@@ -172,6 +172,18 @@ option(ERF_ENABLE_NOAHMP "Enable Noah-MP" OFF)
 
 #Other parameterizations
 option(ERF_ENABLE_WINDFARM "Enable wind farm parameterizations" OFF)
+option(ERF_ENABLE_FIRE "Enable LSFIRE (ELMFIRE) fire spread coupling" OFF)
+if(ERF_ENABLE_FIRE)
+  set(ELMFIRE_DIR "" CACHE PATH "LSFIRE (ELMFIRE-CPP_MPI) source directory (provides include/ELMFIRE_API.H)")
+  set(ELMFIRE_LIB "" CACHE FILEPATH "libelmfire_core.a built against the same AMReX version as ERF")
+  if(NOT EXISTS "${ELMFIRE_DIR}/include/ELMFIRE_API.H")
+    message(FATAL_ERROR "ERF_ENABLE_FIRE=ON requires -DELMFIRE_DIR=<LSFIRE source dir> (got '${ELMFIRE_DIR}')")
+  endif()
+  if(NOT EXISTS "${ELMFIRE_LIB}")
+    message(FATAL_ERROR "ERF_ENABLE_FIRE=ON requires -DELMFIRE_LIB=<path to libelmfire_core.a> (got '${ELMFIRE_LIB}')")
+  endif()
+  message(STATUS "LSFIRE fire coupling: ${ELMFIRE_LIB}")
+endif()
 option(ERF_ENABLE_WSM6_FORT "Enable WSM6 Fortran bridge calls" OFF)
 option(ERF_ENABLE_WDM6_FORT "Enable WDM6 Fortran bridge calls" OFF)
 

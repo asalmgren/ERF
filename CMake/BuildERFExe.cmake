@@ -371,6 +371,20 @@ function(build_erf_lib erf_lib_name)
     target_compile_definitions(${erf_lib_name} PUBLIC ERF_USE_WINDFARM)
   endif()
 
+  if(ERF_ENABLE_FIRE)
+    target_sources(${erf_lib_name} PRIVATE
+      ${SRC_DIR}/FireModel/ERF_FireELMFIRE.cpp
+      ${SRC_DIR}/FireModel/ERF_FireReadFuel.cpp
+      ${SRC_DIR}/FireModel/ERF_FireReadIgnition.cpp
+    )
+    target_include_directories(${erf_lib_name} PUBLIC
+      $<BUILD_INTERFACE:${SRC_DIR}/FireModel>
+      $<BUILD_INTERFACE:${ELMFIRE_DIR}/include>)
+    # LSFIRE's AMReX symbols are provided by ERF's own AMReX (same version)
+    target_link_libraries(${erf_lib_name} PUBLIC ${ELMFIRE_LIB})
+    target_compile_definitions(${erf_lib_name} PUBLIC ERF_USE_FIRE)
+  endif()
+
   if(ERF_BUILD_LIBRARY_ONLY)
     # In library-only superbuild mode, archive extraction + weak amrex_probinit
     # requires a forced reference path (see ERF.cpp/ERF_Prob.cpp link anchor).

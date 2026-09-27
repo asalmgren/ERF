@@ -50,7 +50,7 @@ int FireELMFIRE::read_ignition_from_netcdf(const amrex::Box& domain,
     
     if (success[0] == 0) {
         if (ParallelDescriptor::IOProcessor()) {
-            Print() << "🔥 WARNING: Failed to read ignition mask from " << fname << std::endl;
+            Print() << "Fire: WARNING: Failed to read ignition mask from " << fname << std::endl;
             Print() << "   Check that the file exists and contains variable 'fire_mask'\n";
         }
         return 0;
@@ -89,7 +89,7 @@ int FireELMFIRE::read_ignition_from_netcdf(const amrex::Box& domain,
             }
         }
         
-        Print() << "🔥 Successfully read ignition mask (time index " << time_index 
+        Print() << "Fire: Successfully read ignition mask (time index " << time_index 
                 << ") from " << fname << std::endl;
     }
     

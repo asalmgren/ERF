@@ -41,9 +41,9 @@ int FireELMFIRE::read_static_fuel_from_netcdf(const amrex::Box& domain,
                                            NC_idim_types, NC_iabs, success);
     
     if (success[0] == 1) {
-        Print() << "🔥 Successfully read FBFM40 fuel data from " << fname << std::endl;
+        Print() << "Fire: Successfully read FBFM40 fuel data from " << fname << std::endl;
     } else {
-        Print() << "🔥 WARNING: Failed to read FBFM40 from " << fname << std::endl;
+        Print() << "Fire: WARNING: Failed to read FBFM40 from " << fname << std::endl;
         Print() << "   Check that the file exists and contains variable 'FBFM40'\n";
     }
     

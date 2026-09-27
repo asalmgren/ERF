@@ -347,6 +347,13 @@ ERF::Advance (int lev, double time, double dt_lev, int iteration, int /*ncycle*/
         }
     }
 
+#ifdef ERF_USE_FIRE
+    // **************************************************************************************
+    // Update the fire model (ERF level 0 only) and optionally feed its fluxes back
+    // **************************************************************************************
+    advance_fire_model(lev, time, dt_lev, S_new, U_new, V_new);
+#endif
+
     // **************************************************************************************
     // Update the land surface model
     // **************************************************************************************

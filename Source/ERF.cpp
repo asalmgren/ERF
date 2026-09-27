@@ -245,6 +245,9 @@ ERF::WriteAtIntermediateTime(int step, double cur_time)
         const bool wrote_plotfile = Write3DPlotFile(1,plotfile3d_type_1,plot3d_var_names_1);
         if (wrote_plotfile) {
             ++plotfiles_3d_written;
+#ifdef ERF_USE_FIRE
+            fire_model.WriteFirePlotFile(istep[0], t_new[0]); // fire-grid plotfile (fire_ref_ratio > 1)
+#endif
             interval_diagnostic_consumed = interval_diagnostic_consumed ||
                 erf_plotfile::plot3d_selection_has_interval_mean_diagnostic(plot3d_var_names_1);
         }
@@ -302,6 +305,9 @@ ERF::WriteAtFinalTime()
         const bool wrote_plotfile = Write3DPlotFile(1,plotfile3d_type_1,plot3d_var_names_1);
         if (wrote_plotfile) {
             ++plotfiles_3d_written;
+#ifdef ERF_USE_FIRE
+            fire_model.WriteFirePlotFile(istep[0], t_new[0]); // fire-grid plotfile (fire_ref_ratio > 1)
+#endif
             interval_diagnostic_consumed = interval_diagnostic_consumed ||
                 erf_plotfile::plot3d_selection_has_interval_mean_diagnostic(plot3d_var_names_1);
         }
@@ -1699,6 +1705,9 @@ ERF::InitData_post ()
             const bool wrote_plotfile = Write3DPlotFile(1,plotfile3d_type_1,plot3d_var_names_1);
             if (wrote_plotfile) {
                 ++plotfiles_3d_written;
+#ifdef ERF_USE_FIRE
+                fire_model.WriteFirePlotFile(istep[0], t_new[0]); // fire-grid plotfile (fire_ref_ratio > 1)
+#endif
                 interval_diagnostic_consumed = interval_diagnostic_consumed ||
                     erf_plotfile::plot3d_selection_has_interval_mean_diagnostic(plot3d_var_names_1);
             }
@@ -2538,6 +2547,11 @@ ERF::initializeWindFarm(const int& a_nlevsmax/*!< number of AMR levels */ )
 void
 ERF::restart ()
 {
+#ifdef ERF_USE_FIRE
+    if (solverChoice.fire_type != FireType::None) {
+        Abort("Restart with erf.fire_type != None is not supported yet (fire checkpoint design pending)");
+    }
+#endif
     auto dRestartTime0 = amrex::second();
 
     ReadCheckpointFile();
@@ -2793,6 +2807,10 @@ ERF::init_only (int lev, double elapsed_time)
         solverChoice.buildings_type == BuildingsType::ImmersedForcing) {
         init_immersed_forcing(lev);
     }
+
+#ifdef ERF_USE_FIRE
+    if (lev == 0) { init_fire_model(lev); }
+#endif
 }
 
 // Read in some parameters from inputs file
@@ -3470,6 +3488,21 @@ ERF::ReadParameters ()
         Print() << "Null land surface model!\n";
     } else {
         Abort("Dont know this LandSurfaceType!") ;
+    }
+
+    // Fire model: LSFIRE couples to ERF level 0 only. ERF's amr levels are atmospheric
+    // refinement levels and are unrelated to the fire model's own grid (fire.fire_ref_ratio).
+    if (solverChoice.fire_type != FireType::None) {
+#ifdef ERF_USE_FIRE
+        if (max_level > 0) {
+            Abort("erf.fire_type = ELMFIRE couples the fire model to ERF level 0 only, so ERF "
+                  "amr.max_level must be 0 (use fire.fire_ref_ratio to refine the fire grid)");
+        }
+        fire_model.ReSize(1);
+        fire_model.SetModel<FireELMFIRE>();
+#else
+        Abort("erf.fire_type requires ERF built with -DERF_ENABLE_FIRE=ON");
+#endif
     }
 
     urban.ReSize(max_level+1, solverChoice.urban_enabled_lev);

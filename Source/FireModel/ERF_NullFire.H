@@ -23,9 +23,7 @@ public:
     virtual void Advance(const amrex::Real& dt,
                         const amrex::MultiFab* U,
                         const amrex::MultiFab* V,
-                        const amrex::MultiFab* terrain,
-                        const amrex::iMultiFab* luindex
-                    ) {}
+                        const amrex::MultiFab* terrain) {}
                             
     virtual void GetHeatFlux(amrex::MultiFab& heat_flux) {}
     virtual void GetMoistureFlux(amrex::MultiFab& moisture_flux) {}

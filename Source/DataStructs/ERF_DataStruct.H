@@ -166,6 +166,20 @@ AMREX_ENUM(LandSurfaceType,
 );
 
 /**
+ * @brief Fire spread model (LSFIRE/ELMFIRE; requires ERF_ENABLE_FIRE at build time).
+ */
+AMREX_ENUM(FireType,
+    None, ELMFIRE
+);
+
+/**
+ * @brief Source of the surface wind that drives the fire model.
+ */
+AMREX_ENUM(FireMetSource,
+    Constant, Atmosphere
+);
+
+/**
  * @brief Urban model.
  */
 AMREX_ENUM(UrbanType,
@@ -814,6 +828,15 @@ struct SolverChoice {
         // What type of land surface model to use
         lsm_type = LandSurfaceType::None; // Default
         pp.query_enum_case_insensitive("land_surface_model",lsm_type);
+
+        // Fire spread model (coupled to ERF level 0 only)
+        fire_type = FireType::None; // Default
+        pp.query_enum_case_insensitive("fire_type", fire_type);
+        if (fire_type != FireType::None) {
+            fire_met_source = FireMetSource::Constant; // Default
+            pp.query_enum_case_insensitive("fire_met_source", fire_met_source);
+            pp.query("fire_heat_feedback", fire_heat_feedback);
+        }
 
         // What type of urban model to use and whether it is active at the given level
         urban_type = UrbanType::None;
@@ -1967,6 +1990,12 @@ struct SolverChoice {
             amrex::Print() << "Radiation Model: None" << std::endl;
         }
 
+        if (fire_type != FireType::None) {
+            amrex::Print() << "Fire Model: " << amrex::getEnumNameString(fire_type)
+                           << " (on ERF level 0; wind source: " << amrex::getEnumNameString(fire_met_source)
+                           << ", heat feedback: " << (fire_heat_feedback ? "on" : "off") << ")" << std::endl;
+        }
+
         amrex::Print() << "Gradp_type                  : " << gradp_type << std::endl;
 
         for (int lev = 0; lev <= max_level; lev++) {
@@ -2374,6 +2403,9 @@ struct SolverChoice {
     WindFarmType windfarm_type;
     WindFarmLocType windfarm_loc_type;
     LandSurfaceType lsm_type;
+    FireType fire_type = FireType::None;
+    FireMetSource fire_met_source = FireMetSource::Constant;
+    bool fire_heat_feedback = false;
     UrbanType urban_type;
     amrex::Vector<int> urban_enabled_lev;
     RadiationType rad_type;
@@ -2664,6 +2696,12 @@ struct SolverChoice {
  * @brief Coordinate system for wind-farm turbine locations.
  * @var SolverChoice::lsm_type
  * @brief Land-surface model.
+ * @var SolverChoice::fire_type
+ * @brief Fire spread model (None or ELMFIRE).
+ * @var SolverChoice::fire_met_source
+ * @brief Wind driving the fire: Constant (fire.constant_wind_u/v) or Atmosphere (ERF surface wind).
+ * @var SolverChoice::fire_heat_feedback
+ * @brief Add fire sensible/latent heat flux to the lowest ERF cell.
  * @var SolverChoice::rad_type
  * @brief Radiation model.
  * @var SolverChoice::abl_driver_type

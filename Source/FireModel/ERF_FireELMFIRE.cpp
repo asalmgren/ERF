@@ -31,36 +31,6 @@ FireELMFIRE::FireELMFIRE()
     m_engine = std::make_unique<ELMFIRE::FireEngine>();
 }
 
-// Convert IGBP land use classification to fuel model ID
-// IGBP classes: https://lpdaac.usgs.gov/products/mcd12q1v006/
-int FireELMFIRE::IGBPToFuelModel(int igbp_index)
-{
-    switch (igbp_index) {
-        case 1:  return 165; // Evergreen Needleleaf Forest → TU5
-        case 2:  return 145; // Evergreen Broadleaf Forest → TL5
-        case 3:  return 161; // Deciduous Needleleaf Forest → TU1
-        case 4:  return 161; // Deciduous Broadleaf Forest → TU1
-        case 5:  return 162; // Mixed Forest → TU2
-        case 6:  return 124; // Closed Shrublands → GS4
-        case 7:  return 122; // Open Shrublands → GS2
-        case 8:  return 123; // Woody Savannas → GS3
-        case 9:  return 123; // Savannas → GS3
-        case 10: return 102; // Grasslands → GR2
-        case 11: return 0;   // Permanent Wetlands → Non-burnable
-        case 12: return 101; // Croplands → GR1
-        case 13: return 162; // Urban and Built-Up → TU2
-        case 14: return 121; // Cropland/Natural Mosaic → GS1
-        case 15: return 0;   // Snow and Ice → Non-burnable
-        case 16: return 0;   // Barren or Sparsely Vegetated → Non-burnable
-        case 17: return 0;   // Water Bodies → Non-burnable
-        case 18: return 102; // Wooded Tundra → GR2
-        case 19: return 101; // Mixed Tundra → GR1
-        case 20: return 0;   // Barren Tundra → Non-burnable
-        case 21: return 0;   // Lake → Non-burnable
-        default: return 102; // Unknown → GR2 (moderate grass)
-    }
-}
-
 void FireELMFIRE::Define(SolverChoice& sc)
 {
     // Load fire model parameters from ERF input file
@@ -197,7 +167,7 @@ void FireELMFIRE::Init(int lev,
         fire_dm_ptr   = &m_fire_dm_fine;
 
         if (m_verbosity > 0 && amrex::ParallelDescriptor::IOProcessor()) {
-            amrex::Print() << "🔥 FireELMFIRE: fire_ref_ratio = " << m_fire_ref_ratio
+            amrex::Print() << "FireELMFIRE: fire_ref_ratio = " << m_fire_ref_ratio
                            << " → ELMFIRE domain: " << fine_domain << "\n"
                            << "   Cell size: " << m_geom_fine.CellSize()[0] << " m\n";
         }
@@ -243,7 +213,7 @@ void FireELMFIRE::Init(int lev,
     m_initialized = true;
 
     if (m_verbosity > 0 && amrex::ParallelDescriptor::IOProcessor()) {
-        amrex::Print() << "🔥 FireELMFIRE initialized at level " << lev << "\n";
+        amrex::Print() << "FireELMFIRE initialized at level " << lev << "\n";
         amrex::Print() << "   Mode: " << m_fire_mode << "\n";
         amrex::Print() << "   Domain: " << geom.Domain() << "\n";
         amrex::Print() << "   Cell size: " << geom.CellSize()[0] << " m\n";
@@ -253,8 +223,7 @@ void FireELMFIRE::Init(int lev,
 void FireELMFIRE::Advance(const amrex::Real& dt,
                          const amrex::MultiFab* U,
                          const amrex::MultiFab* V,
-                         const amrex::MultiFab* terrain,
-                         const amrex::iMultiFab* luindex)
+                         const amrex::MultiFab* terrain)
 {
     if (!m_initialized) {
         amrex::Abort("FireELMFIRE::Advance() called before Init()!");
@@ -262,8 +231,7 @@ void FireELMFIRE::Advance(const amrex::Real& dt,
 
     // Track atmospheric time for subcycling
     m_accumulated_dt += dt;
-    static int atmo_step_count = 0;
-    atmo_step_count++;
+    m_atmo_step_count++;
 
     // Check if it's time to ignite (always check, even during subcycling)
     if (m_current_time <= m_ignition_time &&
@@ -274,7 +242,7 @@ void FireELMFIRE::Advance(const amrex::Real& dt,
             m_engine->SetAreaIgnition(m_ignition_mask_lev[0].get());
         }
         if (m_verbosity > 0 && amrex::ParallelDescriptor::IOProcessor()) {
-            amrex::Print() << "🔥 Fire ignited at t = " << m_ignition_time << " s (type: " << m_ignition_type << ")\n";
+            amrex::Print() << "Fire ignited at t = " << m_ignition_time << " s (type: " << m_ignition_type << ")\n";
         }
     }
 
@@ -282,7 +250,7 @@ void FireELMFIRE::Advance(const amrex::Real& dt,
     m_current_time += dt;
 
     // Check if it's time to update fire (subcycling)
-    bool update_fire = (atmo_step_count % m_subcycle_interval == 0);
+    bool update_fire = (m_atmo_step_count % m_subcycle_interval == 0);
 
     if (!update_fire) {
         // Skip fire update this step (subcycling)
@@ -311,19 +279,13 @@ void FireELMFIRE::Advance(const amrex::Real& dt,
         // Priority 1: Use LANDFIRE data loaded by fire model
         fuel_ptr = m_fuel_model_lev[0].get();
         if (m_verbosity > 1 && m_current_time < 1.0 && amrex::ParallelDescriptor::IOProcessor()) {
-            amrex::Print() << "🔥 Using LANDFIRE fuel data\n";
-        }
-    } else if (m_fuel_model_source == "metgrid_igbp" && luindex != nullptr) {
-        // Priority 2: Use luindex from ERF (IGBP conversion happens in ELMFIRE)
-        fuel_ptr = luindex;
-        if (m_verbosity > 1 && m_current_time < 1.0 && amrex::ParallelDescriptor::IOProcessor()) {
-            amrex::Print() << "🔥 Using metgrid IGBP fuel data\n";
+            amrex::Print() << "Fire: Using LANDFIRE fuel data\n";
         }
     } else if (m_fuel_model_source == "uniform") {
         // Priority 3: Uniform mode - ELMFIRE uses m_uniform_fuel_id internally
         fuel_ptr = nullptr;
         if (m_verbosity > 1 && m_current_time < 1.0 && amrex::ParallelDescriptor::IOProcessor()) {
-            amrex::Print() << "🔥 Using uniform fuel model ID: " << m_uniform_fuel_id << "\n";
+            amrex::Print() << "Fire: Using uniform fuel model ID: " << m_uniform_fuel_id << "\n";
         }
     }
 
@@ -412,8 +374,9 @@ void FireELMFIRE::Advance(const amrex::Real& dt,
         m_engine->Advance(fire_dt);
     }
 
-    // Diagnostics
-    if (m_verbosity > 1 && amrex::ParallelDescriptor::IOProcessor()) {
+    // Diagnostics: GetFireArea/GetNarrowBandSize are MPI reductions, so every rank
+    // must call them; amrex::Print only writes on the IO rank.
+    if (m_verbosity > 1) {
         amrex::Real fire_area = m_engine->GetFireArea();
         int narrow_band_size = m_engine->GetNarrowBandSize();
         amrex::Print() << "   Fire: t = " << m_current_time << " s, "
@@ -494,33 +457,28 @@ void FireELMFIRE::GetPlotVar(const std::string& name,
         return;
     }
 
-    // When fire runs at finer resolution than ERF (fire_ref_ratio > 1), heat/moisture
-    // flux must be averaged from the 2D fire grid to the 3D ERF plotfile MultiFab.
-    // We do this in two steps to avoid out-of-bounds z access:
-    //   1. 2D→2D average_down with IntVect(rr,rr,1) into a temp 2D coarse MF
-    //   2. ParallelCopy the 2D coarse result into k=0 of the 3D ERF plot MF
-    // (Using IntVect(rr) in all 3 dims would loop kk=0..rr-1 in z and access
-    //  fire FABs at kk>0 which are out-of-bounds since fire khi=0.)
-    if (m_fire_ref_ratio > 1 && name == "fire_heat_flux") {
-        amrex::MultiFab flux_fine(m_fire_ba_fine, m_fire_dm_fine, 1, 0);
-        m_engine->GetHeatFlux(flux_fine);
-        amrex::MultiFab flux_crse_2d(m_ba_crse_2d, m_dm_crse_2d, 1, 0);
-        flux_crse_2d.setVal(0.0);
-        amrex::average_down(flux_fine, flux_crse_2d,
+    // When fire runs at finer resolution than ERF (fire_ref_ratio > 1), every fire
+    // variable lives on the 2D fire grid and must be averaged to the ERF grid:
+    //   1. fill on the fire grid (fluxes via the flux getters, others via FillPlotVar)
+    //   2. 2D->2D average_down with IntVect(rr,rr,1) into a temp 2D coarse MF
+    //   3. ParallelCopy the 2D coarse result into k=0 of the 3D ERF plot MF
+    // (IntVect(rr) in all 3 dims would read fire FABs at kk>0, out of bounds since
+    //  fire khi=0; filling the ERF-resolution MF directly mismatches the grids.)
+    if (m_fire_ref_ratio > 1) {
+        amrex::MultiFab var_fine(m_fire_ba_fine, m_fire_dm_fine, 1, 0);
+        if (name == "fire_heat_flux") {
+            m_engine->GetHeatFlux(var_fine);
+        } else if (name == "fire_moisture_flux") {
+            m_engine->GetMoistureFlux(var_fine);
+        } else {
+            m_engine->FillPlotVar(name, var_fine);
+        }
+        amrex::MultiFab var_crse_2d(m_ba_crse_2d, m_dm_crse_2d, 1, 0);
+        var_crse_2d.setVal(0.0);
+        amrex::average_down(var_fine, var_crse_2d,
                             0, 1, amrex::IntVect(m_fire_ref_ratio, m_fire_ref_ratio, 1));
         mf.setVal(0.0);
-        mf.ParallelCopy(flux_crse_2d, 0, 0, 1);
-        return;
-    }
-    if (m_fire_ref_ratio > 1 && name == "fire_moisture_flux") {
-        amrex::MultiFab flux_fine(m_fire_ba_fine, m_fire_dm_fine, 1, 0);
-        m_engine->GetMoistureFlux(flux_fine);
-        amrex::MultiFab flux_crse_2d(m_ba_crse_2d, m_dm_crse_2d, 1, 0);
-        flux_crse_2d.setVal(0.0);
-        amrex::average_down(flux_fine, flux_crse_2d,
-                            0, 1, amrex::IntVect(m_fire_ref_ratio, m_fire_ref_ratio, 1));
-        mf.setVal(0.0);
-        mf.ParallelCopy(flux_crse_2d, 0, 0, 1);
+        mf.ParallelCopy(var_crse_2d, 0, 0, 1);
         return;
     }
 
@@ -536,8 +494,27 @@ void FireELMFIRE::LoadConfigFromSolverChoice(SolverChoice& sc)
     // Read fire model parameters from ERF input file using ParmParse
     amrex::ParmParse pp("fire");
 
-    // Fire mode
-    pp.query("mode", m_fire_mode);
+    // Fire mode: erf.fire_met_source is authoritative; fire.mode is derived from it
+    // and, if given explicitly, must agree (a mismatch would extract ERF winds that
+    // the engine then ignores, or vice versa).
+    const std::string derived_mode =
+        (sc.fire_met_source == FireMetSource::Atmosphere) ? "atmospheric" : "constant_wind";
+    m_fire_mode = derived_mode;
+    std::string user_mode;
+    if (pp.query("mode", user_mode) && user_mode != derived_mode) {
+        amrex::Abort("fire.mode = '" + user_mode + "' conflicts with erf.fire_met_source = '" +
+                     amrex::getEnumNameString(sc.fire_met_source) + "' (expects fire.mode = '" +
+                     derived_mode + "' or omit fire.mode)");
+    }
+
+    // Misspelled parameters that older input templates used; they were silently ignored
+    if (pp.contains("bandthickness")) {
+        amrex::Abort("fire.bandthickness is not a parameter; use fire.band_thickness");
+    }
+    if (pp.contains("fire_dt")) {
+        amrex::Abort("fire.fire_dt is not a parameter; the fire advances with the ERF step "
+                     "(see fire.subcycle_interval and fire.cfl)");
+    }
 
     // Fire-level plotfile prefix (only used when fire_ref_ratio > 1)
     pp.query("fire_plot_file", m_fire_plot_file);
@@ -546,14 +523,11 @@ void FireELMFIRE::LoadConfigFromSolverChoice(SolverChoice& sc)
     // If absent, WriteFirePlotFile falls back to the engine's default variable set.
     pp.queryarr("fire_plot_vars_1", m_fire_plot_vars);
 
-    // Fuel model source ("uniform", "metgrid_igbp", or "landfire")
+    // Fuel model source ("uniform" or "landfire")
     pp.query("fuel_model_source", m_fuel_model_source);
     if (m_fuel_model_source != "uniform" &&
-        m_fuel_model_source != "metgrid_igbp" &&
         m_fuel_model_source != "landfire") {
-        amrex::Print() << "WARNING: Unknown fuel_model_source '" << m_fuel_model_source
-                       << "', defaulting to 'uniform'\n";
-        m_fuel_model_source = "uniform";
+        amrex::Abort("fire.fuel_model_source must be 'uniform' or 'landfire', got: " + m_fuel_model_source);
     }
 
     // LANDFIRE NetCDF file path (fire namespace)
@@ -628,7 +602,7 @@ void FireELMFIRE::load_fuel_data(const amrex::Geometry& geom,
     using namespace amrex;
 
     if (m_verbosity > 0 && ParallelDescriptor::IOProcessor()) {
-        Print() << "🔥 Loading LANDFIRE fuel data from " << m_nc_fuel_file << "\n";
+        Print() << "Fire: Loading LANDFIRE fuel data from " << m_nc_fuel_file << "\n";
     }
 
     // Allocate fuel data storage for this level
@@ -665,7 +639,7 @@ void FireELMFIRE::load_fuel_data(const amrex::Geometry& geom,
     m_fuel_model_lev[0]->FillBoundary(geom.periodicity());
 
     if (m_verbosity > 0 && ParallelDescriptor::IOProcessor()) {
-        Print() << "🔥 LANDFIRE fuel data loaded successfully\n";
+        Print() << "Fire: LANDFIRE fuel data loaded successfully\n";
     }
 }
 
@@ -676,7 +650,7 @@ void FireELMFIRE::load_ignition_data(const amrex::Geometry& geom,
     using namespace amrex;
 
     if (m_verbosity > 0 && ParallelDescriptor::IOProcessor()) {
-        Print() << "🔥 Loading ignition mask from " << m_nc_ignition_file << "\n";
+        Print() << "Fire: Loading ignition mask from " << m_nc_ignition_file << "\n";
     }
 
     // Allocate ignition mask storage for this level
@@ -724,7 +698,7 @@ void FireELMFIRE::load_ignition_data(const amrex::Geometry& geom,
     m_ignition_mask_lev[0]->FillBoundary(geom.periodicity());
 
     if (m_verbosity > 0 && ParallelDescriptor::IOProcessor()) {
-        Print() << "🔥 Ignition mask loaded successfully (" << total_ignited << " cells to ignite)\n";
+        Print() << "Fire: Ignition mask loaded successfully (" << total_ignited << " cells to ignite)\n";
     }
 }
 #endif
@@ -736,8 +710,6 @@ void FireELMFIRE::PrintConfig() const
 
     if (m_fuel_model_source == "uniform") {
         amrex::Print() << "    Uniform fuel ID: " << m_uniform_fuel_id << "\n";
-    } else if (m_fuel_model_source == "metgrid_igbp") {
-        amrex::Print() << "    Using IGBP land use from metgrid\n";
     } else if (m_fuel_model_source == "landfire") {
         amrex::Print() << "    LANDFIRE file: " << m_nc_fuel_file << "\n";
     }
@@ -868,7 +840,7 @@ void FireELMFIRE::WriteFirePlotFile(int step, amrex::Real time) const
     if (!m_initialized || m_fire_ref_ratio <= 1 || !m_engine) return;
 
     if (amrex::ParallelDescriptor::IOProcessor()) {
-        amrex::Print() << "🔥 WriteFirePlotFile: step=" << step << " time=" << time << "\n";
+        amrex::Print() << "Fire: WriteFirePlotFile: step=" << step << " time=" << time << "\n";
     }
 
     // Determine which variables to write:

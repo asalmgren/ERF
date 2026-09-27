@@ -48,9 +48,8 @@ public:
     void Advance(const int& lev, const amrex::Real& dt,
                 const amrex::MultiFab* U, 
                 const amrex::MultiFab* V,
-                const amrex::MultiFab* terrain,
-                const amrex::iMultiFab* luindex) {
-        m_fire[lev]->Advance(dt, U, V, terrain, luindex);
+                const amrex::MultiFab* terrain) {
+        m_fire[lev]->Advance(dt, U, V, terrain);
     }
 
     void GetHeatFlux(const int& lev, amrex::MultiFab& heat_flux) {

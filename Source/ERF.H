@@ -76,6 +76,9 @@
 #ifdef ERF_USE_WINDFARM
 #include "ERF_WindFarm.H"
 #endif
+#ifdef ERF_USE_FIRE
+#include "ERF_FireModel.H"
+#endif
 #include <ERF_SurfaceModel.H>
 
 #include <ERF_RadiationModels.H>
@@ -410,6 +413,17 @@ public:
 
     // Init (NOT restart or regrid)
     void init_only (int lev, double time);
+
+#ifdef ERF_USE_FIRE
+    // LSFIRE fire model, coupled to ERF level 0 only (ERF AMR levels are atmospheric
+    // levels, unrelated to the fire model's own grid set by fire.fire_ref_ratio).
+    // Public because they launch GPU kernels (nvcc forbids those in private members).
+    void init_fire_model (int lev);
+    void advance_fire_model (int lev, double time, amrex::Real dt_lev,
+                             amrex::MultiFab& S_new,
+                             const amrex::MultiFab& U_new,
+                             const amrex::MultiFab& V_new);
+#endif
 
     // Restart
     void restart ();
@@ -1311,6 +1325,15 @@ private:
 
     LandSurface lsm;
     Urban urban;
+
+#ifdef ERF_USE_FIRE
+    FireModel fire_model;                                  // one fire model, on ERF level 0
+    std::unique_ptr<amrex::MultiFab> fire_heat_flux;       // [W/m^2], k=0 of ERF level-0 grid
+    std::unique_ptr<amrex::MultiFab> fire_moisture_flux;   // [kg/m^2/s], k=0 of ERF level-0 grid
+    std::unique_ptr<amrex::MultiFab> fire_u_sfc;           // surface wind passed to the fire [m/s]
+    std::unique_ptr<amrex::MultiFab> fire_v_sfc;
+    double fire_last_advance_time = -1.0e300;              // guards one fire advance per ERF step
+#endif
     amrex::Vector<std::string> lsm_data_name;                // (ncomp) -- e.g., sw_dn_dir/dif_vis/nir, lw_dn, cos_zen
     amrex::Vector<amrex::Vector<amrex::MultiFab*>> lsm_data; // (lev,ncomp) Data for LSM coupling
     amrex::Vector<std::string> lsm_flux_name;                // (ncomp) -- e.g., hfx3, q1fx3, tau13, tau23

@@ -373,6 +373,7 @@ function(build_erf_lib erf_lib_name)
 
   if(ERF_ENABLE_FIRE)
     target_sources(${erf_lib_name} PRIVATE
+      ${SRC_DIR}/FireModel/ERF_FireCoupling.cpp
       ${SRC_DIR}/FireModel/ERF_FireELMFIRE.cpp
       ${SRC_DIR}/FireModel/ERF_FireReadFuel.cpp
       ${SRC_DIR}/FireModel/ERF_FireReadIgnition.cpp

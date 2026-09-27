@@ -264,6 +264,20 @@ ERF::appendPlot3DVariables (const Vector<std::string>& plot_var_names,
         }
     }
 
+#ifdef ERF_USE_FIRE
+    // Fire variables: only those explicitly requested; filled last in FillPlot3DVars
+    if (solverChoice.fire_type != FireType::None) {
+        Vector<std::string> fire_plot_names;
+        fire_model.GetPlotVarNames(fire_plot_names);
+        for (auto& plot_name : fire_plot_names) {
+            if (containerHasElement(plot_var_names, plot_name) &&
+                !containerHasElement(tmp_plot_names, plot_name)) {
+                tmp_plot_names.push_back(plot_name);
+            }
+        }
+    }
+#endif
+
     for (int i = 0; i < tmp_plot_names.size(); i++) {
         if (!containerHasElement(a_plot_var_names, tmp_plot_names[i])) {
             a_plot_var_names.push_back(tmp_plot_names[i]);
@@ -2057,6 +2071,23 @@ ERF::FillPlot3DVars (int lev,
             }
         }
     }
+
+#ifdef ERF_USE_FIRE
+    // Must match the order used in appendPlot3DVariables (after microphysics)
+    if (solverChoice.fire_type != FireType::None) {
+        Vector<std::string> fire_plot_names;
+        fire_model.GetPlotVarNames(fire_plot_names);
+        for (auto& plot_name : fire_plot_names) {
+            if (containerHasElement(plot_var_names, plot_name)) {
+                MultiFab temp_dat(mf_dst.boxArray(), mf_dst.DistributionMap(), 1, 0);
+                temp_dat.setVal(0);
+                if (lev == 0) { fire_model.GetPlotVar(plot_name, temp_dat, lev); } // fire lives on ERF level 0
+                MultiFab::Copy(mf_dst, temp_dat, 0, mf_comp, 1, 0);
+                mf_comp += 1;
+            }
+        }
+    }
+#endif
 
     AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
         mf_comp == ncomp_mf,

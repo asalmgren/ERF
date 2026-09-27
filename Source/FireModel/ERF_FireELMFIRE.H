@@ -57,7 +57,7 @@ public:
             m_engine->SetTime(current_time);
         }
         if (amrex::ParallelDescriptor::IOProcessor()) {
-            amrex::Print() << "🔥 Fire model time synchronized to t = " << current_time << " s (restart)\n";
+            amrex::Print() << "Fire model time synchronized to t = " << current_time << " s (restart)\n";
         }
     }
 
@@ -67,13 +67,11 @@ public:
      * @param U Wind velocity component (u) from ERF
      * @param V Wind velocity component (v) from ERF
      * @param terrain Terrain elevation
-     * @param luindex Land use index (fuel map)
      */
     void Advance(const amrex::Real& dt,
                 const amrex::MultiFab* U,
                 const amrex::MultiFab* V,
-                const amrex::MultiFab* terrain,
-                const amrex::iMultiFab* luindex) override;
+                const amrex::MultiFab* terrain) override;
 
     /**
      * @brief Get sensible heat flux from fire (W/m²)
@@ -172,10 +170,9 @@ private:
     /// Empty = write all engine default variables.
     amrex::Vector<std::string> m_fire_plot_vars;
 
-    /// Fuel model source ("uniform", "metgrid_igbp", or "landfire")
+    /// Fuel model source ("uniform" or "landfire")
     /// - uniform: Use single fuel model ID for entire domain
-    /// - metgrid_igbp: Convert IGBP land use index from metgrid to fuel models
-    /// - landfire: Use LANDFIRE fuel data from ERF (placeholder)
+    /// - landfire: LANDFIRE fuel model map read from fire.nc_fuel_file
     std::string m_fuel_model_source = "uniform";
 
     /// Fuel model ID for uniform mode (default: 102 = GR2 moderate grass)
@@ -223,6 +220,7 @@ private:
     amrex::Real m_terrain_scale_factor   = 1.0;  ///< Slope amplification multiplier (1.0 = normal)
 
     /// Subcycling parameters (fire runs at larger timestep than atmosphere)
+    int m_atmo_step_count = 0;           // Atmospheric steps seen (drives subcycling)
     int m_subcycle_interval = 1;         // Fire updates every N atmospheric steps (1 = every step)
     amrex::Real m_accumulated_dt = 0.0;  // Accumulated time since last fire update
 
@@ -327,13 +325,6 @@ private:
                                          amrex::IArrayBox& NC_ign_iab);
 #endif
 
-    /**
-     * @brief Convert IGBP land use index to fuel model ID
-     *
-     * @param igbp_index IGBP land use classification (1-21)
-     * @return Fuel model ID (0 = non-burnable)
-     */
-    static int IGBPToFuelModel(int igbp_index);
 
     /**
      * @brief Load configuration from ERF SolverChoice

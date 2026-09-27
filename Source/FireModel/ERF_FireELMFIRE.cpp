@@ -118,21 +118,19 @@ void FireELMFIRE::Init(int lev,
                 coarse_domain.length(1) * m_fire_ref_ratio - 1,
                 0));
 
-        // Create fine BoxArray and matching DistributionMapping.
-        // IMPORTANT: use maxSize(m_fire_ref_ratio) to guarantee every fine box is
-        // exactly m_fire_ref_ratio cells in each horizontal dimension.
-        // AMReX's maxSize algorithm internally divides out common powers of 2 from
-        // (chunk, nlen), so maxSize(N) does NOT always produce N-cell boxes.
-        // Example: maxSize(240) on 980 cells → ratio=4, bs_red=60, nlen_red=245,
-        // numblk=5 → box size = 49×4 = 196 (not 240!).  196 is not divisible by 20,
-        // so adjacent coarsened fine boxes overlap at cells 9, 19, 29, 39 and
-        // average_down writes garbage at those cells.
-        // With maxSize(20): ratio=4, bs_red=5, nlen_red=245 → numblk=49, sz=5,
-        // box size = 5×4 = 20 cells exactly — no overlap after coarsening by 20.
-        // Result: 49×39 = 1911 fine boxes of 20×20×1, which is fine for 64 MPI ranks.
-        amrex::BoxArray ba_fine(fine_domain);
-        ba_fine.maxSize(m_fire_ref_ratio);
-        amrex::DistributionMapping dm_fine(ba_fine);
+        // Fire BoxArray = ERF level-0 boxes (bottom layer) refined by (rr,rr,1), on the
+        // ERF DistributionMapping. Coarsening it by (rr,rr,1) gives back exactly the ERF
+        // 2D boxes, so the ERF<->fire transfers (ParallelCopy / average_down) are aligned
+        // and rank-local, and the boxes stay as large as ERF's. (The previous
+        // maxSize(fire_ref_ratio) made one fire box per ERF cell: correct but thousands
+        // of tiny boxes, and the engine's per-node box lookup scales with box count.)
+        const amrex::IntVect rr_vect(m_fire_ref_ratio, m_fire_ref_ratio, 1);
+        amrex::BoxList bl_2d = m_ba.boxList();
+        for (amrex::Box& b : bl_2d) { b.setSmall(2, 0); b.setBig(2, 0); }
+        amrex::BoxArray ba_erf_2d(std::move(bl_2d));
+        amrex::BoxArray ba_fine = ba_erf_2d;
+        ba_fine.refine(rr_vect);
+        amrex::DistributionMapping dm_fine = m_dm;
         m_fire_ba_fine = ba_fine;
         m_fire_dm_fine = dm_fine;
 
@@ -154,9 +152,8 @@ void FireELMFIRE::Init(int lev,
         // 2D coarse BA (khi=0): coarsen fire BA in x,y by fire_ref_ratio, z stays 0.
         // Used as intermediate for 2D→2D average_down (avoids OOB z access that
         // occurs when averaging from 2D fine (khi=0) directly into 3D ERF (khi=33)).
-        m_ba_crse_2d = ba_fine;
-        m_ba_crse_2d.coarsen(m_fire_ref_ratio);
-        m_dm_crse_2d = amrex::DistributionMapping(m_ba_crse_2d);
+        m_ba_crse_2d = ba_erf_2d;   // == ba_fine coarsened by (rr,rr,1)
+        m_dm_crse_2d = m_dm;
         m_heat_flux_crse_2d.define(m_ba_crse_2d, m_dm_crse_2d, 1, 0);
         m_moist_flux_crse_2d.define(m_ba_crse_2d, m_dm_crse_2d, 1, 0);
         m_heat_flux_crse_2d.setVal(0.0);

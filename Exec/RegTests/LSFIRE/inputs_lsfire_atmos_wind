@@ -1,0 +1,52 @@
+# ------------------  ERF + LSFIRE: fire driven by the ERF surface wind  -------------------
+# erf.fire_met_source = Atmosphere: the fire uses the ERF wind at the first cell centre (k=1),
+# copied to the 10 m fire grid from its parent 100 m ERF cell. Uniform inviscid 4.89 m/s flow.
+# ERF level 0: 60 x 30 x 4 cells @ 100 m; fire grid: fire_ref_ratio = 10 -> 600 x 300 @ 10 m.
+erf.prob_name = "ABL"
+max_step = 7200               # 1 h
+geometry.prob_extent = 6000 3000 400
+amr.n_cell           = 60 30 4
+geometry.is_periodic = 1 1 0
+zlo.type = "NoSlipWall"
+zhi.type = "SlipWall"
+erf.fixed_dt = 0.5            # ERF compressible stable dt is ~0.85 s at dx = 100 m
+erf.v = 0
+amr.v = 0
+amr.max_level = 0             # the fire couples to ERF level 0 only
+erf.check_int = -1            # fire restart is not supported yet
+erf.plot_file_1 = plt
+erf.plot_int_1  = 7200        # end of run; fire-grid plotfile at the same steps
+erf.plot_vars_1 = density x_velocity fire_phi
+erf.use_gravity = false
+erf.molec_diff_type = "None"
+erf.les_type = "None"
+erf.init_type = "uniform"
+prob.rho_0 = 1.0
+prob.T_0 = 300.0
+prob.U_0 = 4.89
+prob.V_0 = 0.0
+
+# ---- fire ----
+erf.fire_type = "ELMFIRE"
+erf.fire_met_source = "Atmosphere"
+erf.fire_heat_feedback = false
+fire.fire_ref_ratio = 10
+fire.fire_plot_file = "fire_plt"
+fire.fuel_model_source = "uniform"
+fire.uniform_fuel_id = 102            # GR2
+fire.fuel_database_path = "fuel_models.csv"
+fire.wind_height = 10.0
+fire.fuel_moisture_1hr = 0.03
+fire.fuel_moisture_10hr = 0.03
+fire.fuel_moisture_100hr = 0.03
+fire.fuel_moisture_live_herb = 0.30
+fire.fuel_moisture_live_woody = 0.60
+fire.uniform_slope_x = 0.0
+fire.uniform_slope_y = 0.0
+fire.ignition_type = "point"
+fire.ignition_x = 500.0
+fire.ignition_y = 1500.0
+fire.ignition_time = 0.0
+fire.cfl = 0.9
+fire.band_thickness = 5
+fire.verbosity = 1

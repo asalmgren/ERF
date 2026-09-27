@@ -50,6 +50,10 @@ apply_bottom_flux (const Box& bx2d, int k0,
     });
 }
 
+// The fire engine reads/writes these fields in host loops: host-accessible memory
+// (managed on GPU builds, plain on CPU builds).
+MFInfo HostAccessible () { return MFInfo().SetArena(The_Managed_Arena()); }
+
 } // namespace
 
 void
@@ -70,8 +74,8 @@ ERF::init_fire_model (int lev)
         }
     }
 
-    fire_heat_flux     = std::make_unique<MultiFab>(S.boxArray(), S.DistributionMap(), 1, 0);
-    fire_moisture_flux = std::make_unique<MultiFab>(S.boxArray(), S.DistributionMap(), 1, 0);
+    fire_heat_flux     = std::make_unique<MultiFab>(S.boxArray(), S.DistributionMap(), 1, 0, HostAccessible());
+    fire_moisture_flux = std::make_unique<MultiFab>(S.boxArray(), S.DistributionMap(), 1, 0, HostAccessible());
     fire_heat_flux->setVal(zero);
     fire_moisture_flux->setVal(zero);
 
@@ -92,16 +96,24 @@ ERF::advance_fire_model (int lev, double time, Real dt_lev,
 
     const int klo = geom[lev].Domain().smallEnd(2);
 
-    // ---- Atmosphere -> fire: surface wind ------------------------------------------
+    // ---- Atmosphere -> fire: surface wind and terrain height ---------------------
+    BoxList bl = S_new.boxArray().boxList();
+    for (Box& b : bl) { b.setSmall(2, klo); b.setBig(2, klo); }
+    const BoxArray ba2d(std::move(bl));
+
+    // Terrain height of the bottom cell centre (k = klo) with one horizontal ghost cell,
+    // as a host-accessible 2D slab (z_phys_cc itself may live in device memory)
+    if (!fire_terrain_sfc || fire_terrain_sfc->boxArray() != ba2d) {
+        fire_terrain_sfc = std::make_unique<MultiFab>(ba2d, S_new.DistributionMap(), 1, IntVect(1,1,0), HostAccessible());
+    }
+    fire_terrain_sfc->ParallelCopy(*z_phys_cc[lev], 0, 0, 1, IntVect(1,1,0), IntVect(1,1,0));
+
     const MultiFab* U_ptr = nullptr;
     const MultiFab* V_ptr = nullptr;
     if (solverChoice.fire_met_source == FireMetSource::Atmosphere) {
-        BoxList bl = S_new.boxArray().boxList();
-        for (Box& b : bl) { b.setSmall(2, klo); b.setBig(2, klo); }
-        const BoxArray ba2d(std::move(bl));
         if (!fire_u_sfc || fire_u_sfc->boxArray() != ba2d) {
-            fire_u_sfc = std::make_unique<MultiFab>(ba2d, S_new.DistributionMap(), 1, 1);
-            fire_v_sfc = std::make_unique<MultiFab>(ba2d, S_new.DistributionMap(), 1, 1);
+            fire_u_sfc = std::make_unique<MultiFab>(ba2d, S_new.DistributionMap(), 1, 1, HostAccessible());
+            fire_v_sfc = std::make_unique<MultiFab>(ba2d, S_new.DistributionMap(), 1, 1, HostAccessible());
         }
         for (MFIter mfi(*fire_u_sfc); mfi.isValid(); ++mfi) {
             extract_surface_wind(mfi.validbox(), U_new.const_array(mfi), V_new.const_array(mfi),
@@ -113,7 +125,8 @@ ERF::advance_fire_model (int lev, double time, Real dt_lev,
         V_ptr = fire_v_sfc.get();
     }
 
-    fire_model.Advance(lev, dt_lev, U_ptr, V_ptr, z_phys_cc[lev].get());
+    Gpu::streamSynchronize();  // device kernels/copies above -> host reads in the fire engine
+    fire_model.Advance(lev, dt_lev, U_ptr, V_ptr, fire_terrain_sfc.get());
 
     // ---- Fire -> atmosphere: explicit source in the bottom cell (optional) ----------
     // Kept as in the original coupling for stage 2 (off by default):

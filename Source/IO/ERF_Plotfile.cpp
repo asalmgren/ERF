@@ -2079,9 +2079,13 @@ ERF::FillPlot3DVars (int lev,
         fire_model.GetPlotVarNames(fire_plot_names);
         for (auto& plot_name : fire_plot_names) {
             if (containerHasElement(plot_var_names, plot_name)) {
-                MultiFab temp_dat(mf_dst.boxArray(), mf_dst.DistributionMap(), 1, 0);
+                // host-accessible: the fire engine fills plot variables in host loops
+                MultiFab temp_dat(mf_dst.boxArray(), mf_dst.DistributionMap(), 1, 0,
+                                  MFInfo().SetArena(The_Managed_Arena()));
                 temp_dat.setVal(0);
+                Gpu::streamSynchronize();  // setVal kernel before host writes
                 if (lev == 0) { fire_model.GetPlotVar(plot_name, temp_dat, lev); } // fire lives on ERF level 0
+                Gpu::streamSynchronize();
                 MultiFab::Copy(mf_dst, temp_dat, 0, mf_comp, 1, 0);
                 mf_comp += 1;
             }

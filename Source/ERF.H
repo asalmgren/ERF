@@ -1332,6 +1332,7 @@ private:
     std::unique_ptr<amrex::MultiFab> fire_moisture_flux;   // [kg/m^2/s], k=0 of ERF level-0 grid
     std::unique_ptr<amrex::MultiFab> fire_u_sfc;           // surface wind passed to the fire [m/s]
     std::unique_ptr<amrex::MultiFab> fire_v_sfc;
+    std::unique_ptr<amrex::MultiFab> fire_terrain_sfc;     // bottom-cell-centre height [m] (2D slab)
     double fire_last_advance_time = -1.0e300;              // guards one fire advance per ERF step
 #endif
     amrex::Vector<std::string> lsm_data_name;                // (ncomp) -- e.g., sw_dn_dir/dif_vis/nir, lw_dn, cos_zen

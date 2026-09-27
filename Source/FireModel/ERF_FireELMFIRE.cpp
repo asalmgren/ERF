@@ -26,6 +26,14 @@ static void LaunchFillFromNCKernel(const amrex::Box& gtbx,
     });
 }
 
+// FireEngine reads and writes its inputs/outputs in host loops, so every MultiFab
+// handed to it must be host-accessible (managed memory on GPU builds; plain memory
+// on CPU builds), and device kernels writing such data must be synchronized first.
+static amrex::MFInfo HostAccessible ()
+{
+    return amrex::MFInfo().SetArena(amrex::The_Managed_Arena());
+}
+
 FireELMFIRE::FireELMFIRE()
 {
     m_engine = std::make_unique<ELMFIRE::FireEngine>();
@@ -140,12 +148,12 @@ void FireELMFIRE::Init(int lev,
                                       geom.Coord(), is_per);
 
         // Allocate fine-level flux and wind MultiFabs
-        m_heat_flux_fine.define(m_fire_ba_fine, m_fire_dm_fine, 1, 0);
-        m_moist_flux_fine.define(m_fire_ba_fine, m_fire_dm_fine, 1, 0);
+        m_heat_flux_fine.define(m_fire_ba_fine, m_fire_dm_fine, 1, 0, HostAccessible());
+        m_moist_flux_fine.define(m_fire_ba_fine, m_fire_dm_fine, 1, 0, HostAccessible());
         m_heat_flux_fine.setVal(0.0);
         m_moist_flux_fine.setVal(0.0);
-        m_U_fire_fine.define(m_fire_ba_fine, m_fire_dm_fine, 1, 0);
-        m_V_fire_fine.define(m_fire_ba_fine, m_fire_dm_fine, 1, 0);
+        m_U_fire_fine.define(m_fire_ba_fine, m_fire_dm_fine, 1, 0, HostAccessible());
+        m_V_fire_fine.define(m_fire_ba_fine, m_fire_dm_fine, 1, 0, HostAccessible());
         m_U_fire_fine.setVal(0.0);
         m_V_fire_fine.setVal(0.0);
 
@@ -154,8 +162,8 @@ void FireELMFIRE::Init(int lev,
         // occurs when averaging from 2D fine (khi=0) directly into 3D ERF (khi=33)).
         m_ba_crse_2d = ba_erf_2d;   // == ba_fine coarsened by (rr,rr,1)
         m_dm_crse_2d = m_dm;
-        m_heat_flux_crse_2d.define(m_ba_crse_2d, m_dm_crse_2d, 1, 0);
-        m_moist_flux_crse_2d.define(m_ba_crse_2d, m_dm_crse_2d, 1, 0);
+        m_heat_flux_crse_2d.define(m_ba_crse_2d, m_dm_crse_2d, 1, 0, HostAccessible());
+        m_moist_flux_crse_2d.define(m_ba_crse_2d, m_dm_crse_2d, 1, 0, HostAccessible());
         m_heat_flux_crse_2d.setVal(0.0);
         m_moist_flux_crse_2d.setVal(0.0);
 
@@ -327,12 +335,12 @@ void FireELMFIRE::Advance(const amrex::Real& dt,
             amrex::MultiFab terrain_crse, terrain_fine;
             if (have_terrain) {
                 terrain_crse.define(ba_c_from_f, dm_c_from_f, 1, 0);
-                terrain_fine.define(m_fire_ba_fine, m_fire_dm_fine, 1, 0);
+                terrain_fine.define(m_fire_ba_fine, m_fire_dm_fine, 1, 0, HostAccessible());
                 terrain_crse.ParallelCopy(*terrain, 0, 0, 1);
             }
 
-            amrex::MultiFab U_fine(m_fire_ba_fine, m_fire_dm_fine, 1, 0);
-            amrex::MultiFab V_fine(m_fire_ba_fine, m_fire_dm_fine, 1, 0);
+            amrex::MultiFab U_fine(m_fire_ba_fine, m_fire_dm_fine, 1, 0, HostAccessible());
+            amrex::MultiFab V_fine(m_fire_ba_fine, m_fire_dm_fine, 1, 0, HostAccessible());
 
             for (amrex::MFIter mfi(U_fine, amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
                 const amrex::Box& bx = mfi.tilebox();
@@ -355,6 +363,7 @@ void FireELMFIRE::Advance(const amrex::Real& dt,
                 }
             }
 
+            amrex::Gpu::streamSynchronize();  // prolongation kernels -> host reads in the engine
             m_engine->UpdateAtmosphericData(&U_fine, &V_fine,
                                             have_terrain ? &terrain_fine : nullptr,
                                             fuel_ptr);
@@ -384,6 +393,7 @@ void FireELMFIRE::Advance(const amrex::Real& dt,
 
 void FireELMFIRE::GetHeatFlux(amrex::MultiFab& heat_flux)
 {
+    amrex::Gpu::streamSynchronize();  // pending device work on these MultiFabs before host writes
     if (!m_initialized) {
         heat_flux.setVal(0.0);
         return;
@@ -408,6 +418,7 @@ void FireELMFIRE::GetHeatFlux(amrex::MultiFab& heat_flux)
 
 void FireELMFIRE::GetMoistureFlux(amrex::MultiFab& moisture_flux)
 {
+    amrex::Gpu::streamSynchronize();  // pending device work on these MultiFabs before host writes
     if (!m_initialized) {
         moisture_flux.setVal(0.0);
         return;
@@ -449,6 +460,7 @@ void FireELMFIRE::GetPlotVar(const std::string& name,
                             amrex::MultiFab& mf,
                             int lev) const
 {
+    amrex::Gpu::streamSynchronize();  // pending device work on mf before host writes
     if (!m_initialized) {
         mf.setVal(0.0);
         return;
@@ -462,7 +474,7 @@ void FireELMFIRE::GetPlotVar(const std::string& name,
     // (IntVect(rr) in all 3 dims would read fire FABs at kk>0, out of bounds since
     //  fire khi=0; filling the ERF-resolution MF directly mismatches the grids.)
     if (m_fire_ref_ratio > 1) {
-        amrex::MultiFab var_fine(m_fire_ba_fine, m_fire_dm_fine, 1, 0);
+        amrex::MultiFab var_fine(m_fire_ba_fine, m_fire_dm_fine, 1, 0, HostAccessible());
         if (name == "fire_heat_flux") {
             m_engine->GetHeatFlux(var_fine);
         } else if (name == "fire_moisture_flux") {
@@ -605,7 +617,7 @@ void FireELMFIRE::load_fuel_data(const amrex::Geometry& geom,
     // Allocate fuel data storage for this level
     m_fuel_model_lev.resize(1);  // Single level for now
     IntVect ngv(0, 0, 0);  // No ghost cells for static data
-    m_fuel_model_lev[0] = std::make_unique<iMultiFab>(ba, dm, 1, ngv);
+    m_fuel_model_lev[0] = std::make_unique<iMultiFab>(ba, dm, 1, ngv, HostAccessible());
 
     // Read fuel data from NetCDF on IO processor
     Box domain = geom.Domain();
@@ -634,6 +646,7 @@ void FireELMFIRE::load_fuel_data(const amrex::Geometry& geom,
     }
 
     m_fuel_model_lev[0]->FillBoundary(geom.periodicity());
+    amrex::Gpu::streamSynchronize();  // fill kernels -> host reads in the engine
 
     if (m_verbosity > 0 && ParallelDescriptor::IOProcessor()) {
         Print() << "Fire: LANDFIRE fuel data loaded successfully\n";
@@ -653,7 +666,7 @@ void FireELMFIRE::load_ignition_data(const amrex::Geometry& geom,
     // Allocate ignition mask storage for this level
     m_ignition_mask_lev.resize(1);  // Single level for now
     IntVect ngv(0, 0, 0);  // No ghost cells for static data
-    m_ignition_mask_lev[0] = std::make_unique<iMultiFab>(ba, dm, 1, ngv);
+    m_ignition_mask_lev[0] = std::make_unique<iMultiFab>(ba, dm, 1, ngv, HostAccessible());
 
     // Read ignition mask from NetCDF on IO processor
     Box domain = geom.Domain();
@@ -693,6 +706,7 @@ void FireELMFIRE::load_ignition_data(const amrex::Geometry& geom,
     ParallelDescriptor::ReduceIntSum(total_ignited);
 
     m_ignition_mask_lev[0]->FillBoundary(geom.periodicity());
+    amrex::Gpu::streamSynchronize();  // fill kernels -> host reads in the engine
 
     if (m_verbosity > 0 && ParallelDescriptor::IOProcessor()) {
         Print() << "Fire: Ignition mask loaded successfully (" << total_ignited << " cells to ignite)\n";
@@ -769,7 +783,7 @@ void FireELMFIRE::WriteCheckpointData(const std::string& chk_dir, int lev) const
     }
 
     // Write fire phi (level set) - this is the essential fire state
-    amrex::MultiFab phi_out(m_ba, m_dm, 1, 0);
+    amrex::MultiFab phi_out(m_ba, m_dm, 1, 0, HostAccessible());
     m_engine->GetPhiField(phi_out);
     amrex::VisMF::Write(phi_out, chk_dir + "/FirePhi");
 
@@ -810,7 +824,7 @@ void FireELMFIRE::ReadCheckpointData(const std::string& chk_dir, int lev)
     }
 
     // Read phi and restore fire state
-    amrex::MultiFab phi_restart(m_ba, m_dm, 1, 1);
+    amrex::MultiFab phi_restart(m_ba, m_dm, 1, 1, HostAccessible());
     amrex::VisMF::Read(phi_restart, chk_dir + "/FirePhi");
     m_engine->RestorePhiFromCheckpoint(phi_restart);
 
@@ -853,15 +867,16 @@ void FireELMFIRE::WriteFirePlotFile(int step, amrex::Real time) const
     const int ncomp = static_cast<int>(var_names.size());
 
     // Build multi-component MultiFab at fire resolution
-    amrex::MultiFab mf(m_fire_ba_fine, m_fire_dm_fine, ncomp, 0);
+    amrex::MultiFab mf(m_fire_ba_fine, m_fire_dm_fine, ncomp, 0, HostAccessible());
     mf.setVal(0.0);
 
     for (int c = 0; c < ncomp; ++c) {
         if (amrex::ParallelDescriptor::IOProcessor()) {
             amrex::Print() << "  FillPlotVar: " << var_names[c] << "\n";
         }
-        amrex::MultiFab tmp(m_fire_ba_fine, m_fire_dm_fine, 1, 0);
+        amrex::MultiFab tmp(m_fire_ba_fine, m_fire_dm_fine, 1, 0, HostAccessible());
         tmp.setVal(0.0);
+        amrex::Gpu::streamSynchronize();  // setVal kernel before host writes in FillPlotVar
 
         if (var_names[c] == "x_velocity") {
             // Atmospheric U wind prolongated to fire resolution
@@ -871,6 +886,7 @@ void FireELMFIRE::WriteFirePlotFile(int step, amrex::Real time) const
             amrex::MultiFab::Copy(tmp, m_V_fire_fine, 0, 0, 1, 0);
         } else {
             m_engine->FillPlotVar(var_names[c], tmp);
+            amrex::Gpu::streamSynchronize();
         }
 
         amrex::MultiFab::Copy(mf, tmp, 0, c, 1, 0);

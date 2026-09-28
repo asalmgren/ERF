@@ -7,6 +7,8 @@
 #include <ELMFIRE_API.H>
 #include <memory>
 
+class ERFFireHierarchy;   // LSFIRE FireHierarchy adapted to ERF (ERF_FireELMFIRE.cpp)
+
 /**
  * @brief ERF wrapper for ELMFIRE-CPP fire spread model
  *
@@ -22,7 +24,7 @@
 class FireELMFIRE : public NullFire {
 public:
     FireELMFIRE();
-    ~FireELMFIRE() override = default;
+    ~FireELMFIRE() override;
 
     // ============================================
     // PUBLIC INTERFACE (ERF integration)
@@ -50,16 +52,7 @@ public:
      * @brief Set current simulation time (for restart)
      * @param current_time Current simulation time in seconds
      */
-    void SetTime(const amrex::Real& current_time) override { 
-        m_current_time = current_time;
-        // Also synchronize ELMFIRE engine's internal time
-        if (m_engine) {
-            m_engine->SetTime(current_time);
-        }
-        if (amrex::ParallelDescriptor::IOProcessor()) {
-            amrex::Print() << "Fire model time synchronized to t = " << current_time << " s (restart)\n";
-        }
-    }
+    void SetTime(const amrex::Real& current_time) override;
 
     /**
      * @brief Advance fire spread by dt
@@ -136,8 +129,12 @@ private:
     // DATA MEMBERS
     // ============================================
 
-    /// ELMFIRE engine (from library)
-    std::unique_ptr<ELMFIRE::FireEngine> m_engine;
+    /// LSFIRE fire-level hierarchy (fire L0 = the fire_ref_ratio grid; no finer fire
+    /// levels yet). Fire levels are unrelated to ERF's AMR levels.
+    std::unique_ptr<ERFFireHierarchy> m_hier;
+
+    /// Fire engine of fire level 0 (fluxes, plot variables)
+    ELMFIRE::FireEngine& Engine0() const;
 
     /// ELMFIRE configuration
     ELMFIRE::Config m_config;

@@ -1,21 +1,22 @@
 # ------------------  ERF + LSFIRE: constant-wind fire (Rothermel ellipse)  -------------------
-# Fire ignores the atmosphere (erf.fire_met_source = Constant). Same fire inputs as
-# LSFIRE examples/standalone_offline (elmfire_standalone); results are bitwise identical to it.
+# Fire ignores the atmosphere (erf.fire_met_source = Constant). Same fire inputs as the LSFIRE
+# ellipse case; with the ERF step equal to the fire step (0.9 s = fire.cfl * dx / 10 m/s) the
+# result equals LSFIRE elmfire_amr (one fire level, same 10 m grid) to round-off.
 # ERF level 0: 60 x 30 x 4 cells @ 100 m; fire grid: fire_ref_ratio = 10 -> 600 x 300 @ 10 m.
 erf.prob_name = "ABL"
-max_step = 21600              # 6 h
+max_step = 24000              # 6 h
 geometry.prob_extent = 6000 3000 400
 amr.n_cell           = 60 30 4
 geometry.is_periodic = 1 1 0
 zlo.type = "NoSlipWall"
 zhi.type = "SlipWall"
-erf.fixed_dt = 1.0            # = elmfire_standalone outer step (atmosphere stays uniform here)
+erf.fixed_dt = 0.9            # = fire level-0 step (atmosphere stays uniform here)
 erf.v = 0
 amr.v = 0
 amr.max_level = 0             # the fire couples to ERF level 0 only
 erf.check_int = -1            # fire restart is not supported yet
 erf.plot_file_1 = plt
-erf.plot_int_1  = 3600        # hourly; the fire-grid plotfile is written at the same steps
+erf.plot_int_1  = 4000        # hourly; the fire-grid plotfile is written at the same steps
 erf.plot_vars_1 = density x_velocity fire_phi
 erf.use_gravity = false
 erf.molec_diff_type = "None"

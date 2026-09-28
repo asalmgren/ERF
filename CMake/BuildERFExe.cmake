@@ -380,7 +380,8 @@ function(build_erf_lib erf_lib_name)
     )
     target_include_directories(${erf_lib_name} PUBLIC
       $<BUILD_INTERFACE:${SRC_DIR}/FireModel>
-      $<BUILD_INTERFACE:${ELMFIRE_DIR}/include>)
+      $<BUILD_INTERFACE:${ELMFIRE_DIR}/include>
+      $<BUILD_INTERFACE:${ELMFIRE_DIR}/src>)   # Core/FireHierarchy.H
     # LSFIRE's AMReX symbols are provided by ERF's own AMReX (same version)
     target_link_libraries(${erf_lib_name} PUBLIC ${ELMFIRE_LIB})
     target_compile_definitions(${erf_lib_name} PUBLIC ERF_USE_FIRE)

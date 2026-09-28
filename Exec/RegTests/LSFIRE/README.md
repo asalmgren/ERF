@@ -30,9 +30,14 @@ All cases: ERF level 0 is 60 x 30 x 4 cells at 100 m; `fire.fire_ref_ratio = 10`
 
 | Inputs | What it checks | Reference result (1 rank, CPU) |
 |---|---|---|
-| `inputs_lsfire_constant_wind` | `erf.fire_met_source = Constant`: the ERF wrapper does not change the fire model | Bitwise identical to LSFIRE `elmfire_standalone` with the same fire inputs (phi, fuel fraction, heat and moisture flux, hourly to 6 h). Burned area 318,700 m^2 at 1 h, 11,092,200 m^2 at 6 h. ~280 s. |
+| `inputs_lsfire_constant_wind` | `erf.fire_met_source = Constant`: the ERF wrapper does not change the fire model | Equal to LSFIRE `elmfire_amr` with one fire level on the same 10 m grid and the same fire inputs (phi within 1e-9, identical burned cells at 1 h and 6 h). Burned area 318,900 m^2 at 1 h, 11,092,600 m^2 at 6 h. ~5 min. |
 | `inputs_lsfire_atmos_wind` | `erf.fire_met_source = Atmosphere`: ERF surface wind drives the fire | Uniform 4.89 m/s at the lowest ERF cell centre (50 m above ground) reaches every fire cell; at 1 h burned area 146,700 m^2, head fire downwind. With `fire.atmos_wind_height=50` the result is bitwise identical; with `fire.atmos_wind_height=46.875` it reproduces the value before the k = 0 change (commit 036ad2e9e and earlier: k = 1 wind, fixed 46.875 m), 149,100 m^2. ~70 s. |
 | `inputs_lsfire_heat_feedback` | `erf.fire_heat_feedback = true` with `MoistNoCondensation` | Domain integrals of rho*theta and rho*qv increase by exactly Sum(P dt)/Cp_d and Sum(E dt) (relative difference ~1e-11), with P and E the applied heat power and vapor rate printed every step (`erf.v = 2`). ~16 s. |
+
+The fire advances with its own level-0 step (`fire.cfl` x fire dx / 10 m/s), clipped to the end
+of each ERF step (or of `fire.subcycle_interval` ERF steps); with an ERF step that is a multiple
+of it the fire steps are unchanged, otherwise they are split, which changes results at the
+round-off-to-small level (e.g. ERF step 1.0 s vs fire step 0.9 s: IoU 0.9994 after 1 h).
 
 The constant-wind and atmospheric-wind areas differ by design: in constant-wind mode
 `fire.constant_wind_u` is taken as the 20-ft wind; in atmospheric mode LSFIRE converts the

@@ -1,4 +1,5 @@
 #include "ERF_FireELMFIRE.H"
+#include "Core/FireHierarchy.H"
 #include <AMReX_ParallelDescriptor.H>
 #include <AMReX_ParmParse.H>
 #include <AMReX_Print.H>
@@ -34,9 +35,68 @@ static amrex::MFInfo HostAccessible ()
     return amrex::MFInfo().SetArena(amrex::The_Managed_Arena());
 }
 
-FireELMFIRE::FireELMFIRE()
+/**
+ * LSFIRE FireHierarchy driven by ERF: geometry, grids and fire parameters come from
+ * FireELMFIRE; the atmospheric forcing for fire level 0 is injected before each
+ * level-0 fire step.
+ */
+class ERFFireHierarchy : public FireHierarchy
 {
-    m_engine = std::make_unique<ELMFIRE::FireEngine>();
+public:
+    ERFFireHierarchy (const amrex::Geometry& fire_l0_geom, const amrex::AmrInfo& info,
+                      const ELMFIRE::Config& config,
+                      amrex::Real ign_x, amrex::Real ign_y, amrex::Real ign_radius, amrex::Real ign_time)
+        : FireHierarchy(fire_l0_geom, info)
+    {
+        // FireELMFIRE's parsing of fire.* stays authoritative for the engine config
+        m_fire_config     = config;
+        m_ignition_x      = ign_x;
+        m_ignition_y      = ign_y;
+        m_ignition_radius = ign_radius;
+        m_ignition_time   = ign_time;
+        m_ignition_shape  = "point";
+    }
+
+    /** Atmospheric data on fire level 0's grids, used by the following AdvanceTo. */
+    void SetLevel0Atmosphere (const amrex::MultiFab* u, const amrex::MultiFab* v,
+                              const amrex::MultiFab* terrain, const amrex::iMultiFab* fuel,
+                              const amrex::MultiFab* wind_height)
+    {
+        m_u = u; m_v = v; m_terrain = terrain; m_fuel = fuel; m_height = wind_height;
+        m_have_atmosphere = true;
+    }
+    void ClearAtmosphere () { m_have_atmosphere = false; }
+
+protected:
+    void AdvanceLevel (int lev, amrex::Real time, amrex::Real dt) override
+    {
+        if (lev == 0 && m_have_atmosphere) {
+            LevelEngine(0).UpdateAtmosphericData(m_u, m_v, m_terrain, m_fuel, m_height);
+        }
+        FireHierarchy::AdvanceLevel(lev, time, dt);
+    }
+
+private:
+    const amrex::MultiFab* m_u = nullptr;
+    const amrex::MultiFab* m_v = nullptr;
+    const amrex::MultiFab* m_terrain = nullptr;
+    const amrex::iMultiFab* m_fuel = nullptr;
+    const amrex::MultiFab* m_height = nullptr;
+    bool m_have_atmosphere = false;
+};
+
+FireELMFIRE::FireELMFIRE() = default;
+FireELMFIRE::~FireELMFIRE() = default;
+
+ELMFIRE::FireEngine& FireELMFIRE::Engine0() const { return m_hier->LevelEngine(0); }
+
+void FireELMFIRE::SetTime(const amrex::Real& current_time)
+{
+    m_current_time = current_time;
+    if (m_hier) { Engine0().SetTime(current_time); }
+    if (amrex::ParallelDescriptor::IOProcessor()) {
+        amrex::Print() << "Fire model time synchronized to t = " << current_time << " s (restart)\n";
+    }
 }
 
 void FireELMFIRE::Define(SolverChoice& sc)
@@ -116,8 +176,9 @@ void FireELMFIRE::Init(int lev,
     const amrex::BoxArray* fire_ba_ptr   = &m_ba;
     const amrex::DistributionMapping* fire_dm_ptr = &m_dm;
 
-    if (m_fire_ref_ratio > 1) {
-        // Build fine domain: refine ERF's coarse domain by ref_ratio in x,y only.
+    {
+        // Fire level-0 domain: ERF's domain refined by fire_ref_ratio (>= 1) in x,y only.
+        // The fire is 2D, so it is always a single z layer (also for fire_ref_ratio = 1).
         // Fire model is 2D — keep z as a single layer (k=0).
         amrex::Box coarse_domain = geom.Domain();
         amrex::Box fine_domain(
@@ -181,8 +242,24 @@ void FireELMFIRE::Init(int lev,
         }
     }
 
-    // Initialize ELMFIRE engine at fire resolution (may differ from ERF resolution)
-    m_engine->Initialize(*fire_geom_ptr, m_config, fire_ba_ptr, fire_dm_ptr);
+    // Fire-level hierarchy on the fire level-0 grid. Fire levels have no z refinement.
+    {
+        amrex::ParmParse ppa("fire_amr");
+        int fire_max_level = 0;
+        ppa.query("max_level", fire_max_level);
+        if (fire_max_level > 0) {
+            amrex::Abort("fire_amr.max_level > 0 is not supported yet in ERF (Phase 13 step 3)");
+        }
+        amrex::AmrInfo fire_info;
+        fire_info.max_level       = 0;
+        fire_info.ref_ratio       = {amrex::IntVect(2,2,1)};
+        fire_info.blocking_factor = {amrex::IntVect(1,1,1)};  // level-0 grids are prescribed
+        fire_info.max_grid_size   = {amrex::IntVect(1024,1024,1)};
+        fire_info.n_error_buf     = {amrex::IntVect(1,1,0)};
+        m_hier = std::make_unique<ERFFireHierarchy>(*fire_geom_ptr, fire_info, m_config,
+                                                    m_ignition_x, m_ignition_y,
+                                                    m_ignition_radius, m_ignition_time);
+    }
 
 #ifdef ERF_USE_NETCDF
     // LANDFIRE: Load fuel data at fire resolution
@@ -209,14 +286,12 @@ void FireELMFIRE::Init(int lev,
     }
 #endif
 
-    // Set ignition if ignition time is 0
-    if (m_ignition_time == 0.0) {
-        if (m_ignition_type == "point") {
-            m_engine->SetIgnition(m_ignition_x, m_ignition_y, m_ignition_radius, 0.0);
-        } else if (m_ignition_type == "area") {
-            m_engine->SetAreaIgnition(m_ignition_mask_lev[0].get());
-        }
+    // Ignition: point (fire.ignition_x/y/radius) or area (mask), at fire.ignition_time;
+    // applied by the hierarchy at t = 0 (InitData) or when ignition_time is reached.
+    if (m_ignition_type == "area") {
+        m_hier->SetIgnitionMask(0, m_ignition_mask_lev[0].get());
     }
+    m_hier->InitData(*fire_ba_ptr, *fire_dm_ptr);
 
     m_initialized = true;
 
@@ -242,18 +317,7 @@ void FireELMFIRE::Advance(const amrex::Real& dt,
     m_accumulated_dt += dt;
     m_atmo_step_count++;
 
-    // Check if it's time to ignite (always check, even during subcycling)
-    if (m_current_time <= m_ignition_time &&
-        m_current_time + dt >= m_ignition_time) {
-        if (m_ignition_type == "point") {
-            m_engine->SetIgnition(m_ignition_x, m_ignition_y, m_ignition_radius, m_ignition_time);
-        } else if (m_ignition_type == "area") {
-            m_engine->SetAreaIgnition(m_ignition_mask_lev[0].get());
-        }
-        if (m_verbosity > 0 && amrex::ParallelDescriptor::IOProcessor()) {
-            amrex::Print() << "Fire ignited at t = " << m_ignition_time << " s (type: " << m_ignition_type << ")\n";
-        }
-    }
+    // Ignition (point or area, at fire.ignition_time) is applied by the fire hierarchy.
 
     // Update current time (always advances, even if fire doesn't update)
     m_current_time += dt;
@@ -304,14 +368,17 @@ void FireELMFIRE::Advance(const amrex::Real& dt,
         if (m_verbosity > 0 && m_current_time < 1.0 && amrex::ParallelDescriptor::IOProcessor()) {
             amrex::Print() << "FireELMFIRE: Using CONSTANT WIND mode\n";
         }
-        m_engine->Advance(fire_dt);
+        m_hier->AdvanceTo(m_current_time);
     } else {
         // Mode 2: Atmospheric coupling (ERF-driven)
         if (m_verbosity > 0 && m_current_time < 1.0 && amrex::ParallelDescriptor::IOProcessor()) {
             amrex::Print() << "FireELMFIRE: Using ATMOSPHERIC COUPLING mode\n";
         }
 
-        if (m_fire_ref_ratio > 1 && U != nullptr && V != nullptr) {
+        if (U == nullptr || V == nullptr) {
+            amrex::Abort("FireELMFIRE: atmospheric mode requires the ERF surface wind");
+        }
+        {
             // ELMFIRE runs at finer grid than ERF: nearest-neighbor prolongation
             // ------------------------------------------------------------------
             // Strategy: coarsen fine BoxArray → same spatial coverage as ERF coarse
@@ -385,30 +452,25 @@ void FireELMFIRE::Advance(const amrex::Real& dt,
             }
 
             amrex::Gpu::streamSynchronize();  // prolongation kernels -> host reads in the engine
-            m_engine->UpdateAtmosphericData(&U_fine, &V_fine,
-                                            have_terrain ? &terrain_fine : nullptr,
-                                            fuel_ptr,
-                                            have_height ? &height_fine : nullptr);
+            m_hier->SetLevel0Atmosphere(&U_fine, &V_fine,
+                                        have_terrain ? &terrain_fine : nullptr,
+                                        fuel_ptr,
+                                        have_height ? &height_fine : nullptr);
+            m_hier->AdvanceTo(m_current_time);   // wind held fixed over the accumulated interval
+            m_hier->ClearAtmosphere();
 
             // Store prolongated winds for fire plotfile output (x_velocity / y_velocity)
             amrex::MultiFab::Copy(m_U_fire_fine, U_fine, 0, 0, 1, 0);
             amrex::MultiFab::Copy(m_V_fire_fine, V_fine, 0, 0, 1, 0);
             if (have_height) { amrex::MultiFab::Copy(m_H_fire_fine, height_fine, 0, 0, 1, 0); }
-        } else {
-            // Same resolution: pass ERF wind (and its height) directly
-            m_engine->UpdateAtmosphericData(U, V, terrain, fuel_ptr,
-                                            m_use_atmos_wind_height_override ? nullptr : wind_height_in);
         }
-
-        // Advance fire with accumulated timestep
-        m_engine->Advance(fire_dt);
     }
 
     // Diagnostics: GetFireArea/GetNarrowBandSize are MPI reductions, so every rank
     // must call them; amrex::Print only writes on the IO rank.
     if (m_verbosity > 1) {
-        amrex::Real fire_area = m_engine->GetFireArea();
-        int narrow_band_size = m_engine->GetNarrowBandSize();
+        amrex::Real fire_area = m_hier->GetCompositeBurnedArea();
+        int narrow_band_size = Engine0().GetNarrowBandSize();
         amrex::Print() << "   Fire: t = " << m_current_time << " s, "
                        << "area = " << fire_area << " m², "
                        << "active cells = " << narrow_band_size << "\n";
@@ -423,20 +485,18 @@ void FireELMFIRE::GetHeatFlux(amrex::MultiFab& heat_flux)
         return;
     }
 
-    if (m_fire_ref_ratio > 1) {
-        // Get fine-level heat flux from ELMFIRE, then average down to ERF coarse grid.
+    {
+        // Get the fire-level-0 heat flux, then average it down to the ERF grid.
         // Step 1: 2D→2D average_down with IntVect(rr,rr,1) — z stays at k=0.
         //   Using IntVect(rr) (same for all dims) would loop kk=0..rr-1 in z,
         //   accessing fire FABs at kk>0 which are out-of-bounds (fire is 2D, khi=0).
         // Step 2: ParallelCopy the 2D coarse result into k=0 of the 3D ERF MF.
-        m_engine->GetHeatFlux(m_heat_flux_fine);
+        Engine0().GetHeatFlux(m_heat_flux_fine);
         m_heat_flux_crse_2d.setVal(0.0);
         amrex::average_down(m_heat_flux_fine, m_heat_flux_crse_2d,
                             0, 1, amrex::IntVect(m_fire_ref_ratio, m_fire_ref_ratio, 1));
         heat_flux.setVal(0.0);
         heat_flux.ParallelCopy(m_heat_flux_crse_2d, 0, 0, 1);
-    } else {
-        m_engine->GetHeatFlux(heat_flux);
     }
 }
 
@@ -448,16 +508,14 @@ void FireELMFIRE::GetMoistureFlux(amrex::MultiFab& moisture_flux)
         return;
     }
 
-    if (m_fire_ref_ratio > 1) {
+    {
         // Same 2D→2D → ParallelCopy pattern as GetHeatFlux (see comment there).
-        m_engine->GetMoistureFlux(m_moist_flux_fine);
+        Engine0().GetMoistureFlux(m_moist_flux_fine);
         m_moist_flux_crse_2d.setVal(0.0);
         amrex::average_down(m_moist_flux_fine, m_moist_flux_crse_2d,
                             0, 1, amrex::IntVect(m_fire_ref_ratio, m_fire_ref_ratio, 1));
         moisture_flux.setVal(0.0);
         moisture_flux.ParallelCopy(m_moist_flux_crse_2d, 0, 0, 1);
-    } else {
-        m_engine->GetMoistureFlux(moisture_flux);
     }
 }
 
@@ -467,7 +525,7 @@ amrex::Real FireELMFIRE::get_fire_area() const
         return 0.0;
     }
 
-    return m_engine->GetFireArea();
+    return m_hier->GetCompositeBurnedArea();
 }
 
 void FireELMFIRE::GetPlotVarNames(amrex::Vector<std::string>& names) const
@@ -490,21 +548,21 @@ void FireELMFIRE::GetPlotVar(const std::string& name,
         return;
     }
 
-    // When fire runs at finer resolution than ERF (fire_ref_ratio > 1), every fire
+    // The fire lives on its own 2D grid (fire_ref_ratio >= 1 times finer than ERF): every fire
     // variable lives on the 2D fire grid and must be averaged to the ERF grid:
     //   1. fill on the fire grid (fluxes via the flux getters, others via FillPlotVar)
     //   2. 2D->2D average_down with IntVect(rr,rr,1) into a temp 2D coarse MF
     //   3. ParallelCopy the 2D coarse result into k=0 of the 3D ERF plot MF
     // (IntVect(rr) in all 3 dims would read fire FABs at kk>0, out of bounds since
     //  fire khi=0; filling the ERF-resolution MF directly mismatches the grids.)
-    if (m_fire_ref_ratio > 1) {
+    {
         amrex::MultiFab var_fine(m_fire_ba_fine, m_fire_dm_fine, 1, 0, HostAccessible());
         if (name == "fire_heat_flux") {
-            m_engine->GetHeatFlux(var_fine);
+            Engine0().GetHeatFlux(var_fine);
         } else if (name == "fire_moisture_flux") {
-            m_engine->GetMoistureFlux(var_fine);
+            Engine0().GetMoistureFlux(var_fine);
         } else {
-            m_engine->FillPlotVar(name, var_fine);
+            Engine0().FillPlotVar(name, var_fine);
         }
         amrex::MultiFab var_crse_2d(m_ba_crse_2d, m_dm_crse_2d, 1, 0);
         var_crse_2d.setVal(0.0);
@@ -512,10 +570,7 @@ void FireELMFIRE::GetPlotVar(const std::string& name,
                             0, 1, amrex::IntVect(m_fire_ref_ratio, m_fire_ref_ratio, 1));
         mf.setVal(0.0);
         mf.ParallelCopy(var_crse_2d, 0, 0, 1);
-        return;
     }
-
-    m_engine->FillPlotVar(name, mf);
 }
 
 // ============================================
@@ -803,7 +858,7 @@ void FireELMFIRE::PrintConfig() const
 
 void FireELMFIRE::WriteCheckpointData(const std::string& chk_dir, int lev) const
 {
-    if (!m_initialized || !m_engine) return;
+    if (!m_initialized || !m_hier) return;
 
     if (amrex::ParallelDescriptor::IOProcessor()) {
         amrex::Print() << "Writing fire checkpoint data at level " << lev << "\n";
@@ -811,7 +866,7 @@ void FireELMFIRE::WriteCheckpointData(const std::string& chk_dir, int lev) const
 
     // Write fire phi (level set) - this is the essential fire state
     amrex::MultiFab phi_out(m_ba, m_dm, 1, 0, HostAccessible());
-    m_engine->GetPhiField(phi_out);
+    Engine0().GetPhiField(phi_out);
     amrex::VisMF::Write(phi_out, chk_dir + "/FirePhi");
 
     // Write fire time for consistency check on restart
@@ -824,7 +879,7 @@ void FireELMFIRE::WriteCheckpointData(const std::string& chk_dir, int lev) const
 
 void FireELMFIRE::ReadCheckpointData(const std::string& chk_dir, int lev)
 {
-    if (!m_initialized || !m_engine) return;
+    if (!m_initialized || !m_hier) return;
 
     // Check if fire checkpoint data exists (VisMF writes a _H header file)
     std::string phi_header = chk_dir + "/FirePhi_H";
@@ -853,7 +908,7 @@ void FireELMFIRE::ReadCheckpointData(const std::string& chk_dir, int lev)
     // Read phi and restore fire state
     amrex::MultiFab phi_restart(m_ba, m_dm, 1, 1, HostAccessible());
     amrex::VisMF::Read(phi_restart, chk_dir + "/FirePhi");
-    m_engine->RestorePhiFromCheckpoint(phi_restart);
+    Engine0().RestorePhiFromCheckpoint(phi_restart);
 
     // Read and verify fire time
     if (amrex::ParallelDescriptor::IOProcessor()) {
@@ -875,7 +930,7 @@ void FireELMFIRE::ReadCheckpointData(const std::string& chk_dir, int lev)
 void FireELMFIRE::WriteFirePlotFile(int step, amrex::Real time) const
 {
     // Only write when ELMFIRE runs at finer resolution than ERF
-    if (!m_initialized || m_fire_ref_ratio <= 1 || !m_engine) return;
+    if (!m_initialized || m_fire_ref_ratio <= 1 || !m_hier) return;
 
     if (amrex::ParallelDescriptor::IOProcessor()) {
         amrex::Print() << "Fire: WriteFirePlotFile: step=" << step << " time=" << time << "\n";
@@ -914,7 +969,7 @@ void FireELMFIRE::WriteFirePlotFile(int step, amrex::Real time) const
             // Atmospheric V wind prolongated to fire resolution
             amrex::MultiFab::Copy(tmp, m_V_fire_fine, 0, 0, 1, 0);
         } else {
-            m_engine->FillPlotVar(var_names[c], tmp);
+            Engine0().FillPlotVar(var_names[c], tmp);
             amrex::Gpu::streamSynchronize();
         }
 

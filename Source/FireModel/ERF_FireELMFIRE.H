@@ -340,6 +340,15 @@ private:
     int m_fire_max_level = 0;
     std::string m_nc_refine_mask_file;
 
+    /// Optional full-domain fields at fire level-1 resolution (else level 1 samples level 0)
+    std::string m_nc_fuel_file_l1;       // fire.nc_fuel_file_l1 (FBFM, like fire.nc_fuel_file)
+    std::string m_nc_ignition_file_l1;   // fire.nc_ignition_file_l1 (fire_mask)
+    amrex::IArrayBox m_fuel_l1_full;
+    amrex::IArrayBox m_ignition_l1_full;
+
+    /// erf.fire_heat_feedback: fluxes returned to ERF are fire-level-0 time averages
+    bool m_heat_feedback = false;
+
 
     /**
      * @brief Load configuration from ERF SolverChoice

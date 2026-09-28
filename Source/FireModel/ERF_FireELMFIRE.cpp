@@ -27,6 +27,7 @@ static void LaunchFillFromNCKernel(const amrex::Box& gtbx,
     });
 }
 
+
 // FireEngine reads and writes its inputs/outputs in host loops, so every MultiFab
 // handed to it must be host-accessible (managed memory on GPU builds; plain memory
 // on CPU builds), and device kernels writing such data must be synchronized first.
@@ -35,18 +36,40 @@ static amrex::MFInfo HostAccessible ()
     return amrex::MFInfo().SetArena(amrex::The_Managed_Arena());
 }
 
+// Fire cell (i,j) of a fire level takes the value of the coarse cell (i/r, j/r) it lies in;
+// the coarse data were already copied onto this level's layout coarsened by (r,r,1).
+static void LaunchProlongNearest (const amrex::Box& bx, int r,
+                                  const amrex::Array4<const amrex::Real>& c,
+                                  const amrex::Array4<amrex::Real>& f)
+{
+    amrex::ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept {
+        f(i,j,k) = c(i/r, j/r, k);
+    });
+}
+static void LaunchProlongNearestInt (const amrex::Box& bx, int r,
+                                     const amrex::Array4<const int>& c,
+                                     const amrex::Array4<int>& f)
+{
+    amrex::ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept {
+        f(i,j,k) = c(i/r, j/r, k);
+    });
+}
+
 /**
- * LSFIRE FireHierarchy driven by ERF: geometry, grids and fire parameters come from
- * FireELMFIRE; the atmospheric forcing for fire level 0 is injected before each
- * level-0 fire step.
+ * LSFIRE FireHierarchy driven by ERF. Geometry, grids and fire parameters come from
+ * FireELMFIRE. Before a fire level advances, it receives the ERF surface wind, its height
+ * and the terrain height taken directly from the ERF level-0 grid (each fire cell uses the
+ * ERF cell it lies in), plus its fuel map. Area-ignition masks and fuel maps for fire
+ * levels above 0 come from a full-resolution field when given, else from fire level 0.
+ * Optionally accumulates the fire-level-0 fluxes for their time average over an interval.
  */
 class ERFFireHierarchy : public FireHierarchy
 {
 public:
     ERFFireHierarchy (const amrex::Geometry& fire_l0_geom, const amrex::AmrInfo& info,
-                      const ELMFIRE::Config& config,
+                      const ELMFIRE::Config& config, int fire_ref_ratio, bool atmospheric,
                       amrex::Real ign_x, amrex::Real ign_y, amrex::Real ign_radius, amrex::Real ign_time)
-        : FireHierarchy(fire_l0_geom, info)
+        : FireHierarchy(fire_l0_geom, info), m_fire_ref_ratio(fire_ref_ratio), m_atmospheric(atmospheric)
     {
         // FireELMFIRE's parsing of fire.* stays authoritative for the engine config
         m_fire_config     = config;
@@ -57,32 +80,192 @@ public:
         m_ignition_shape  = "point";
     }
 
-    /** Atmospheric data on fire level 0's grids, used by the following AdvanceTo. */
-    void SetLevel0Atmosphere (const amrex::MultiFab* u, const amrex::MultiFab* v,
-                              const amrex::MultiFab* terrain, const amrex::iMultiFab* fuel,
-                              const amrex::MultiFab* wind_height)
+    /** ERF 2D fields (ERF level-0 layout, bottom layer): wind, its height above ground
+     *  (may be null) and terrain height. Used by every fire level until the next call. */
+    void SetAtmosphere (const amrex::MultiFab* u, const amrex::MultiFab* v,
+                        const amrex::MultiFab* height, const amrex::MultiFab* terrain)
     {
-        m_u = u; m_v = v; m_terrain = terrain; m_fuel = fuel; m_height = wind_height;
-        m_have_atmosphere = true;
+        m_src_u = u; m_src_v = v; m_src_h = height; m_src_terrain = terrain;
+        m_atm_serial++;
     }
-    void ClearAtmosphere () { m_have_atmosphere = false; }
+    void ClearAtmosphere () { m_src_u = m_src_v = m_src_h = m_src_terrain = nullptr; }
+
+    /** Fuel map on fire level 0 and, optionally, a full-domain field at fire level-1
+     *  resolution (otherwise level 1 samples level 0). */
+    void SetFuel (const amrex::iMultiFab* fuel_l0, const amrex::IArrayBox* fuel_l1_full)
+    { m_fuel_l0 = fuel_l0; m_fuel_l1_full = fuel_l1_full; }
+
+    /** Area-ignition mask on fire level 0 and, optionally, at full level-1 resolution. */
+    void SetAreaIgnition (const amrex::iMultiFab* mask_l0, const amrex::IArrayBox* mask_l1_full)
+    { m_ign_l0 = mask_l0; m_ign_l1_full = mask_l1_full; SetIgnitionMask(0, mask_l0); }
+
+    /** Accumulate fire-level-0 heat and vapor fluxes x dt between Begin and End. */
+    void BeginFluxAverage () {
+        if (!m_acc_heat.ok()) {
+            m_acc_heat.define(boxArray(0), DistributionMap(0), 1, 0, HostAccessible());
+            m_acc_moist.define(boxArray(0), DistributionMap(0), 1, 0, HostAccessible());
+            m_tmp_flux.define(boxArray(0), DistributionMap(0), 1, 0, HostAccessible());
+        }
+        m_acc_heat.setVal(0.0); m_acc_moist.setVal(0.0); m_acc_time = 0.0; m_accumulating = true;
+    }
+    /** Time-averaged fluxes over the interval (0 if no time elapsed) into level-0 MultiFabs. */
+    void EndFluxAverage (amrex::MultiFab& heat_avg, amrex::MultiFab& moist_avg) {
+        m_accumulating = false;
+        heat_avg.setVal(0.0); moist_avg.setVal(0.0);
+        if (m_acc_time > 0.0) {
+            amrex::MultiFab::Saxpy(heat_avg,  1.0 / m_acc_time, m_acc_heat,  0, 0, 1, 0);
+            amrex::MultiFab::Saxpy(moist_avg, 1.0 / m_acc_time, m_acc_moist, 0, 0, 1, 0);
+        }
+        amrex::Gpu::streamSynchronize();
+    }
+
+    /** Level fields last passed to the fire (plotting); null if none. */
+    const amrex::MultiFab* LevelWindU (int lev) const { return lev < m_u.size() ? m_u[lev].get() : nullptr; }
+    const amrex::MultiFab* LevelWindV (int lev) const { return lev < m_v.size() ? m_v[lev].get() : nullptr; }
+    const amrex::MultiFab* LevelWindHeight (int lev) const { return (lev < m_h.size() && m_src_h_used) ? m_h[lev].get() : nullptr; }
+
+    void IgniteLevel (int lev, amrex::Real time, bool initial) override
+    {
+        if (lev > 0 && m_ign_l0 != nullptr) {
+            MakeLevelIntField(lev, m_ign_l0, m_ign_l1_full, m_ign);
+            SetIgnitionMask(lev, m_ign[lev].get());
+        }
+        FireHierarchy::IgniteLevel(lev, time, initial);
+    }
 
 protected:
+    // Wind actually given to the finest fire level, in the multi-level fire plotfile
+    void GetExtraPlotVarNames (amrex::Vector<std::string>& names) const override
+    {
+        if (m_atmospheric) { names.push_back("x_velocity"); names.push_back("y_velocity"); names.push_back("wind_height"); }
+    }
+    void FillExtraPlotVar (const std::string& name, amrex::MultiFab& mf) const override
+    {
+        const int lev = finest_level;
+        const amrex::MultiFab* src = (name == "x_velocity") ? LevelWindU(lev)
+                                   : (name == "y_velocity") ? LevelWindV(lev) : LevelWindHeight(lev);
+        if (src != nullptr) { amrex::MultiFab::Copy(mf, *src, 0, 0, 1, 0); }
+    }
+
     void AdvanceLevel (int lev, amrex::Real time, amrex::Real dt) override
     {
-        if (lev == 0 && m_have_atmosphere) {
-            LevelEngine(0).UpdateAtmosphericData(m_u, m_v, m_terrain, m_fuel, m_height);
+        if (m_src_u != nullptr && m_src_v != nullptr) {
+            FillLevelAtmosphere(lev);
+            const amrex::iMultiFab* fuel = nullptr;
+            if (m_fuel_l0 != nullptr) {
+                if (lev == 0) { fuel = m_fuel_l0; }
+                else { MakeLevelIntField(lev, m_fuel_l0, m_fuel_l1_full, m_fuel); fuel = m_fuel[lev].get(); }
+            }
+            LevelEngine(lev).UpdateAtmosphericData(m_u[lev].get(), m_v[lev].get(),
+                                                   m_src_terrain ? m_t[lev].get() : nullptr,
+                                                   fuel, m_src_h ? m_h[lev].get() : nullptr);
         }
         FireHierarchy::AdvanceLevel(lev, time, dt);
+
+        if (lev == 0 && m_accumulating) {
+            amrex::Gpu::streamSynchronize();
+            LevelEngine(0).GetHeatFlux(m_tmp_flux);
+            amrex::MultiFab::Saxpy(m_acc_heat, dt, m_tmp_flux, 0, 0, 1, 0);
+            amrex::Gpu::streamSynchronize();
+            LevelEngine(0).GetMoistureFlux(m_tmp_flux);
+            amrex::MultiFab::Saxpy(m_acc_moist, dt, m_tmp_flux, 0, 0, 1, 0);
+            amrex::Gpu::streamSynchronize();
+            m_acc_time += dt;
+        }
     }
 
 private:
-    const amrex::MultiFab* m_u = nullptr;
-    const amrex::MultiFab* m_v = nullptr;
-    const amrex::MultiFab* m_terrain = nullptr;
-    const amrex::iMultiFab* m_fuel = nullptr;
-    const amrex::MultiFab* m_height = nullptr;
-    bool m_have_atmosphere = false;
+    // Total refinement of fire level `lev` relative to ERF level 0 in x (== y)
+    int RatioToERF (int lev) const {
+        int r = m_fire_ref_ratio;
+        for (int l = 0; l < lev; ++l) { r *= refRatio(l)[0]; }
+        return r;
+    }
+
+    // Copy an ERF 2D field onto fire level `lev`: ParallelCopy onto the level's layout
+    // coarsened to ERF resolution, then each fire cell takes its ERF cell.
+    void ToLevel (int lev, const amrex::MultiFab& src, std::unique_ptr<amrex::MultiFab>& dst) {
+        const int r = RatioToERF(lev);
+        amrex::BoxArray bac = boxArray(lev);
+        bac.coarsen(amrex::IntVect(r, r, 1));
+        amrex::MultiFab crse(bac, DistributionMap(lev), 1, 0);
+        crse.ParallelCopy(src, 0, 0, 1);
+        if (!dst || dst->boxArray() != boxArray(lev)) {
+            dst = std::make_unique<amrex::MultiFab>(boxArray(lev), DistributionMap(lev), 1, 0, HostAccessible());
+        }
+        for (amrex::MFIter mfi(*dst, amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+            LaunchProlongNearest(mfi.tilebox(), r, crse.const_array(mfi), dst->array(mfi));
+        }
+    }
+
+    void FillLevelAtmosphere (int lev) {
+        const int nlev = finest_level + 1;
+        if (static_cast<int>(m_u.size()) < nlev) {
+            m_u.resize(nlev); m_v.resize(nlev); m_h.resize(nlev); m_t.resize(nlev);
+            m_filled_serial.resize(nlev, -1);
+        }
+        if (m_filled_serial[lev] == m_atm_serial) { return; }   // wind fixed until next SetAtmosphere
+        ToLevel(lev, *m_src_u, m_u[lev]);
+        ToLevel(lev, *m_src_v, m_v[lev]);
+        if (m_src_h)       { ToLevel(lev, *m_src_h, m_h[lev]); }
+        if (m_src_terrain) { ToLevel(lev, *m_src_terrain, m_t[lev]); }
+        m_src_h_used = (m_src_h != nullptr);
+        amrex::Gpu::streamSynchronize();   // device kernels -> host reads in the engine
+        m_filled_serial[lev] = m_atm_serial;
+    }
+
+    // Integer field (fuel map, ignition mask) on fire level lev > 0: from a full-domain
+    // level-1 field when given, else each cell takes its fire-level-0 cell.
+    void MakeLevelIntField (int lev, const amrex::iMultiFab* l0, const amrex::IArrayBox* full,
+                            amrex::Vector<std::unique_ptr<amrex::iMultiFab>>& out)
+    {
+        if (static_cast<int>(out.size()) <= lev) { out.resize(lev + 1); }
+        if (out[lev] && out[lev]->boxArray() == boxArray(lev)) { return; }
+        out[lev] = std::make_unique<amrex::iMultiFab>(boxArray(lev), DistributionMap(lev), 1, 0, HostAccessible());
+        if (full != nullptr) {
+            AMREX_ALWAYS_ASSERT(lev == 1);
+            const amrex::Box& dom = Geom(lev).Domain();
+            const amrex::Box& fb = full->box();
+            if (fb.length(0) != dom.length(0) || fb.length(1) != dom.length(1)) {
+                amrex::Abort("Fire level-1 NetCDF field dimensions do not match the fire level-1 domain");
+            }
+            for (amrex::MFIter mfi(*out[lev]); mfi.isValid(); ++mfi) {
+                LaunchFillFromNCKernel(mfi.validbox(), out[lev]->array(mfi), full->const_array(),
+                                       fb.smallEnd(0), fb.bigEnd(0), fb.smallEnd(1), fb.bigEnd(1));
+            }
+        } else {
+            const int r = refRatio(0)[0];
+            amrex::BoxArray bac = boxArray(lev);
+            bac.coarsen(amrex::IntVect(r, r, 1));
+            amrex::iMultiFab crse(bac, DistributionMap(lev), 1, 0);
+            crse.ParallelCopy(*l0, 0, 0, 1);
+            for (amrex::MFIter mfi(*out[lev]); mfi.isValid(); ++mfi) {
+                LaunchProlongNearestInt(mfi.validbox(), r, crse.const_array(mfi), out[lev]->array(mfi));
+            }
+        }
+        amrex::Gpu::streamSynchronize();
+    }
+
+    int m_fire_ref_ratio = 1;
+    bool m_atmospheric = false;
+    const amrex::MultiFab* m_src_u = nullptr;
+    const amrex::MultiFab* m_src_v = nullptr;
+    const amrex::MultiFab* m_src_h = nullptr;
+    const amrex::MultiFab* m_src_terrain = nullptr;
+    bool m_src_h_used = false;
+    long m_atm_serial = 0;
+    amrex::Vector<long> m_filled_serial;
+    amrex::Vector<std::unique_ptr<amrex::MultiFab>> m_u, m_v, m_h, m_t;   // per fire level
+
+    const amrex::iMultiFab* m_fuel_l0 = nullptr;
+    const amrex::IArrayBox* m_fuel_l1_full = nullptr;
+    const amrex::iMultiFab* m_ign_l0 = nullptr;
+    const amrex::IArrayBox* m_ign_l1_full = nullptr;
+    amrex::Vector<std::unique_ptr<amrex::iMultiFab>> m_fuel, m_ign;      // per fire level (> 0)
+
+    bool m_accumulating = false;
+    amrex::Real m_acc_time = 0.0;
+    amrex::MultiFab m_acc_heat, m_acc_moist, m_tmp_flux;
 };
 
 FireELMFIRE::FireELMFIRE() = default;
@@ -101,6 +284,8 @@ void FireELMFIRE::SetTime(const amrex::Real& current_time)
 
 void FireELMFIRE::Define(SolverChoice& sc)
 {
+    m_heat_feedback = sc.fire_heat_feedback;
+
     // Load fire model parameters from ERF input file
     LoadConfigFromSolverChoice(sc);
 
@@ -251,15 +436,6 @@ void FireELMFIRE::Init(int lev,
         if (m_fire_max_level < 0 || m_fire_max_level > 1) {
             amrex::Abort("fire_amr.max_level must be 0 or 1 (static fire L1)");
         }
-        if (m_fire_max_level > 0) {
-            // Not yet: fire L1 forcing/fuel/area ignition come from fire L0 data (Phase 13 step 4)
-            if (m_fire_mode != "constant_wind") {
-                amrex::Abort("fire_amr.max_level = 1 currently requires erf.fire_met_source = Constant");
-            }
-            if (m_ignition_type == "area" || m_fuel_model_source == "landfire") {
-                amrex::Abort("fire_amr.max_level = 1 currently supports point ignition and uniform fuel only");
-            }
-        }
         int ref_ratio = 2, blocking_factor = 2, max_grid_size = 64, n_error_buf = 1;
         ppa.query("ref_ratio", ref_ratio);
         ppa.query("blocking_factor", blocking_factor);
@@ -273,7 +449,8 @@ void FireELMFIRE::Init(int lev,
         fire_info.blocking_factor.assign(m_fire_max_level + 1, amrex::IntVect(blocking_factor, blocking_factor, 1));
         fire_info.max_grid_size.assign(m_fire_max_level + 1, amrex::IntVect(max_grid_size, max_grid_size, 1));
         fire_info.n_error_buf.assign(m_fire_max_level + 1, amrex::IntVect(n_error_buf, n_error_buf, 0));
-        m_hier = std::make_unique<ERFFireHierarchy>(*fire_geom_ptr, fire_info, m_config,
+        m_hier = std::make_unique<ERFFireHierarchy>(*fire_geom_ptr, fire_info, m_config, m_fire_ref_ratio,
+                                                    !m_config.use_constant_wind,
                                                     m_ignition_x, m_ignition_y,
                                                     m_ignition_radius, m_ignition_time);
 
@@ -316,10 +493,42 @@ void FireELMFIRE::Init(int lev,
     }
 #endif
 
-    // Ignition: point (fire.ignition_x/y/radius) or area (mask), at fire.ignition_time;
+    // Optional fire level-1 resolution fuel / ignition fields (full fire-L1 domain)
+    const amrex::IArrayBox* fuel_l1 = nullptr;
+    const amrex::IArrayBox* ign_l1  = nullptr;
+    if (!m_nc_fuel_file_l1.empty() || !m_nc_ignition_file_l1.empty()) {
+        if (m_fire_max_level < 1) {
+            amrex::Abort("fire.nc_fuel_file_l1 / fire.nc_ignition_file_l1 require fire_amr.max_level = 1");
+        }
+#ifdef ERF_USE_NETCDF
+        const amrex::Box dom_l1 = amrex::refine(fire_geom_ptr->Domain(), m_hier->refRatio(0));
+        if (!m_nc_fuel_file_l1.empty() && m_fuel_model_source == "landfire") {
+            if (read_static_fuel_from_netcdf(dom_l1, m_nc_fuel_file_l1, m_fuel_l1_full) == 0) {
+                amrex::Abort("Failed to read FBFM from fire.nc_fuel_file_l1 = " + m_nc_fuel_file_l1);
+            }
+            fuel_l1 = &m_fuel_l1_full;
+        }
+        if (!m_nc_ignition_file_l1.empty() && m_ignition_type == "area") {
+            if (read_ignition_from_netcdf(dom_l1, m_nc_ignition_file_l1, m_ignition_time_index, m_ignition_l1_full) == 0) {
+                amrex::Abort("Failed to read fire_mask from fire.nc_ignition_file_l1 = " + m_nc_ignition_file_l1);
+            }
+            ign_l1 = &m_ignition_l1_full;
+        }
+#else
+        amrex::Abort("fire.nc_fuel_file_l1 / fire.nc_ignition_file_l1 require NetCDF support (ERF_USE_NETCDF)");
+#endif
+    }
+
+    // Fuel map (used with atmospheric forcing): fire L0 from fire.nc_fuel_file; fire L1
+    // from fire.nc_fuel_file_l1 if given, else sampled from fire L0.
+    if (m_fuel_model_source == "landfire") {
+        m_hier->SetFuel(m_fuel_model_lev[0].get(), fuel_l1);
+    }
+    // Ignition: point (fire.ignition_x/y/radius) or area (mask; fire L1 from
+    // fire.nc_ignition_file_l1 if given, else sampled from fire L0), at fire.ignition_time;
     // applied by the hierarchy at t = 0 (InitData) or when ignition_time is reached.
     if (m_ignition_type == "area") {
-        m_hier->SetIgnitionMask(0, m_ignition_mask_lev[0].get());
+        m_hier->SetAreaIgnition(m_ignition_mask_lev[0].get(), ign_l1);
     }
     m_hier->InitData(*fire_ba_ptr, *fire_dm_ptr);
 
@@ -375,125 +584,48 @@ void FireELMFIRE::Advance(const amrex::Real& dt,
         }
     }
 
-    // Determine fuel source to pass to ELMFIRE (fallback logic)
-    const amrex::iMultiFab* fuel_ptr = nullptr;
+    // Fuel maps (LANDFIRE) were given to the hierarchy at Init (SetFuel).
 
-    if (m_fuel_model_source == "landfire" && !m_fuel_model_lev.empty() && m_fuel_model_lev[0]) {
-        // Priority 1: Use LANDFIRE data loaded by fire model
-        fuel_ptr = m_fuel_model_lev[0].get();
-        if (m_verbosity > 1 && m_current_time < 1.0 && amrex::ParallelDescriptor::IOProcessor()) {
-            amrex::Print() << "Fire: Using LANDFIRE fuel data\n";
-        }
-    } else if (m_fuel_model_source == "uniform") {
-        // Priority 3: Uniform mode - ELMFIRE uses m_uniform_fuel_id internally
-        fuel_ptr = nullptr;
-        if (m_verbosity > 1 && m_current_time < 1.0 && amrex::ParallelDescriptor::IOProcessor()) {
-            amrex::Print() << "Fire: Using uniform fuel model ID: " << m_uniform_fuel_id << "\n";
-        }
-    }
-
-    // Call appropriate ELMFIRE advance method based on mode
+    // Advance every fire level to the ERF time. In atmospheric mode each fire level takes
+    // the ERF wind / height / terrain directly from the ERF grid, held fixed over the
+    // interval. With heat feedback the fire-level-0 fluxes are time-averaged over it.
     if (m_config.use_constant_wind) {
-        // Mode 1: Constant wind (offline testing)
         if (m_verbosity > 0 && m_current_time < 1.0 && amrex::ParallelDescriptor::IOProcessor()) {
             amrex::Print() << "FireELMFIRE: Using CONSTANT WIND mode\n";
         }
-        m_hier->AdvanceTo(m_current_time);
     } else {
-        // Mode 2: Atmospheric coupling (ERF-driven)
         if (m_verbosity > 0 && m_current_time < 1.0 && amrex::ParallelDescriptor::IOProcessor()) {
             amrex::Print() << "FireELMFIRE: Using ATMOSPHERIC COUPLING mode\n";
         }
-
         if (U == nullptr || V == nullptr) {
             amrex::Abort("FireELMFIRE: atmospheric mode requires the ERF surface wind");
         }
-        {
-            // ELMFIRE runs at finer grid than ERF: nearest-neighbor prolongation
-            // ------------------------------------------------------------------
-            // Strategy: coarsen fine BoxArray → same spatial coverage as ERF coarse
-            //   boxes. ParallelCopy gathers coarse ERF data to the right MPI ranks.
-            //   Then prolong 1:1 within each MFIter (ic = i/rr, jc = j/rr).
-            const int rr = m_fire_ref_ratio;
+        // fire.atmos_wind_height (fixed height) overrides ERF's per-column height
+        m_hier->SetAtmosphere(U, V, m_use_atmos_wind_height_override ? nullptr : wind_height_in, terrain);
+    }
 
-            amrex::BoxArray ba_c_from_f = m_fire_ba_fine;
-            ba_c_from_f.coarsen(rr);
-            // Use m_fire_dm_fine for the coarsened grid: ba_c_from_f has the same
-            // number of boxes as m_fire_ba_fine (1:1 correspondence after coarsen),
-            // so we can reuse m_fire_dm_fine to guarantee U_crse and U_fine share
-            // the same box ownership.  A freshly-constructed DM would map boxes to
-            // different ranks, causing U_crse.const_array(mfi) to crash on the
-            // fire-box-owning ranks.
-            const amrex::DistributionMapping& dm_c_from_f = m_fire_dm_fine;
-
-            amrex::MultiFab U_crse(ba_c_from_f, dm_c_from_f, 1, 0);
-            amrex::MultiFab V_crse(ba_c_from_f, dm_c_from_f, 1, 0);
-            U_crse.ParallelCopy(*U, 0, 0, 1);
-            V_crse.ParallelCopy(*V, 0, 0, 1);
-
-            // Wind height: prolong like the wind (ignored if fire.atmos_wind_height is set)
-            const amrex::MultiFab* wind_height = m_use_atmos_wind_height_override ? nullptr : wind_height_in;
-            const bool have_height = (wind_height != nullptr);
-            amrex::MultiFab height_crse, height_fine;
-            if (have_height) {
-                height_crse.define(ba_c_from_f, dm_c_from_f, 1, 0);
-                height_fine.define(m_fire_ba_fine, m_fire_dm_fine, 1, 0, HostAccessible());
-                height_crse.ParallelCopy(*wind_height, 0, 0, 1);
-            }
-
-            // Terrain: prolong from ERF coarse grid to fire fine grid (same as offline)
-            const bool have_terrain = (terrain != nullptr);
-            amrex::MultiFab terrain_crse, terrain_fine;
-            if (have_terrain) {
-                terrain_crse.define(ba_c_from_f, dm_c_from_f, 1, 0);
-                terrain_fine.define(m_fire_ba_fine, m_fire_dm_fine, 1, 0, HostAccessible());
-                terrain_crse.ParallelCopy(*terrain, 0, 0, 1);
-            }
-
-            amrex::MultiFab U_fine(m_fire_ba_fine, m_fire_dm_fine, 1, 0, HostAccessible());
-            amrex::MultiFab V_fine(m_fire_ba_fine, m_fire_dm_fine, 1, 0, HostAccessible());
-
-            for (amrex::MFIter mfi(U_fine, amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
-                const amrex::Box& bx = mfi.tilebox();
-                auto u_f = U_fine.array(mfi);
-                auto v_f = V_fine.array(mfi);
-                const auto u_c = U_crse.const_array(mfi);
-                const auto v_c = V_crse.const_array(mfi);
-                amrex::ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept {
-                    int ic = i / rr, jc = j / rr;
-                    u_f(i,j,k) = u_c(ic, jc, k);
-                    v_f(i,j,k) = v_c(ic, jc, k);
-                });
-                if (have_height) {
-                    auto h_f = height_fine.array(mfi);
-                    const auto h_c = height_crse.const_array(mfi);
-                    amrex::ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept {
-                        h_f(i,j,k) = h_c(i / rr, j / rr, k);
-                    });
-                }
-                if (have_terrain) {
-                    auto t_f = terrain_fine.array(mfi);
-                    const auto t_c = terrain_crse.const_array(mfi);
-                    amrex::ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept {
-                        int ic = i / rr, jc = j / rr;
-                        t_f(i,j,k) = t_c(ic, jc, k);
-                    });
-                }
-            }
-
-            amrex::Gpu::streamSynchronize();  // prolongation kernels -> host reads in the engine
-            m_hier->SetLevel0Atmosphere(&U_fine, &V_fine,
-                                        have_terrain ? &terrain_fine : nullptr,
-                                        fuel_ptr,
-                                        have_height ? &height_fine : nullptr);
-            m_hier->AdvanceTo(m_current_time);   // wind held fixed over the accumulated interval
-            m_hier->ClearAtmosphere();
-
-            // Store prolongated winds for fire plotfile output (x_velocity / y_velocity)
-            amrex::MultiFab::Copy(m_U_fire_fine, U_fine, 0, 0, 1, 0);
-            amrex::MultiFab::Copy(m_V_fire_fine, V_fine, 0, 0, 1, 0);
-            if (have_height) { amrex::MultiFab::Copy(m_H_fire_fine, height_fine, 0, 0, 1, 0); }
+    if (m_heat_feedback) { m_hier->BeginFluxAverage(); }
+    m_hier->AdvanceTo(m_current_time);
+    if (m_heat_feedback) {
+        m_hier->EndFluxAverage(m_heat_flux_fine, m_moist_flux_fine);
+        if (m_verbosity > 1) {   // sum() is an MPI reduction: all ranks
+            const auto dxf = m_geom_fine.CellSizeArray();
+            const amrex::Real released = m_heat_flux_fine.sum(0) * dxf[0] * dxf[1] * fire_dt;
+            amrex::Print() << "Fire: heat released by fire level 0 over the last " << fire_dt
+                           << " s = " << std::setprecision(12) << released << " J" << std::endl;
         }
+    }
+
+    if (!m_config.use_constant_wind) {
+        // Fire-level-0 wind (and height) for the fire plotfile (x_velocity / y_velocity / wind_height)
+        if (m_hier->LevelWindU(0)) {
+            amrex::MultiFab::Copy(m_U_fire_fine, *m_hier->LevelWindU(0), 0, 0, 1, 0);
+            amrex::MultiFab::Copy(m_V_fire_fine, *m_hier->LevelWindV(0), 0, 0, 1, 0);
+        }
+        if (m_hier->LevelWindHeight(0)) {
+            amrex::MultiFab::Copy(m_H_fire_fine, *m_hier->LevelWindHeight(0), 0, 0, 1, 0);
+        }
+        m_hier->ClearAtmosphere();
     }
 
     // Diagnostics: GetFireArea/GetNarrowBandSize are MPI reductions, so every rank
@@ -516,12 +648,12 @@ void FireELMFIRE::GetHeatFlux(amrex::MultiFab& heat_flux)
     }
 
     {
-        // Get the fire-level-0 heat flux, then average it down to the ERF grid.
+        // Time-averaged fire-level-0 heat flux, averaged down to the ERF grid.
         // Step 1: 2D→2D average_down with IntVect(rr,rr,1) — z stays at k=0.
         //   Using IntVect(rr) (same for all dims) would loop kk=0..rr-1 in z,
         //   accessing fire FABs at kk>0 which are out-of-bounds (fire is 2D, khi=0).
         // Step 2: ParallelCopy the 2D coarse result into k=0 of the 3D ERF MF.
-        Engine0().GetHeatFlux(m_heat_flux_fine);
+        // m_heat_flux_fine = fire-level-0 heat flux averaged over the last fire update interval
         m_heat_flux_crse_2d.setVal(0.0);
         amrex::average_down(m_heat_flux_fine, m_heat_flux_crse_2d,
                             0, 1, amrex::IntVect(m_fire_ref_ratio, m_fire_ref_ratio, 1));
@@ -540,7 +672,7 @@ void FireELMFIRE::GetMoistureFlux(amrex::MultiFab& moisture_flux)
 
     {
         // Same 2D→2D → ParallelCopy pattern as GetHeatFlux (see comment there).
-        Engine0().GetMoistureFlux(m_moist_flux_fine);
+        // m_moist_flux_fine = fire-level-0 vapor flux averaged over the last fire update interval
         m_moist_flux_crse_2d.setVal(0.0);
         amrex::average_down(m_moist_flux_fine, m_moist_flux_crse_2d,
                             0, 1, amrex::IntVect(m_fire_ref_ratio, m_fire_ref_ratio, 1));
@@ -650,6 +782,8 @@ void FireELMFIRE::LoadConfigFromSolverChoice(SolverChoice& sc)
 
     // LANDFIRE NetCDF file path (fire namespace)
     pp.query("nc_fuel_file", m_nc_fuel_file);
+    pp.query("nc_fuel_file_l1", m_nc_fuel_file_l1);           // optional, fire level-1 resolution
+    pp.query("nc_ignition_file_l1", m_nc_ignition_file_l1);   // optional, fire level-1 resolution
 
     // Validate: landfire mode REQUIRES nc_fuel_file
     if (m_fuel_model_source == "landfire") {

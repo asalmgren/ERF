@@ -53,7 +53,8 @@ ERF wind from its actual height to the 20-ft height with a log law.
 | `fire.atmos_wind_height` | Height above ground [m] assumed for the atmospheric wind. Default: not set, i.e. the actual height of the ERF k = 0 cell centre in each column (z_cc - surface). Set it only to impose a fixed height, e.g. in idealized tests. |
 | `erf.fire_heat_feedback` | Add the fire heat flux to rho*theta, and the vapor flux to rho*qv when a moisture model is active, in the bottom ERF cell. Default `false`. |
 | `fire.fire_ref_ratio` | Fire grid refinement relative to ERF level 0 (x and y). The fire grid uses the ERF level-0 boxes refined by this ratio, on the same MPI ranks. |
-| `fire.fuel_model_source` | `uniform` (`fire.uniform_fuel_id`) or `landfire` (`fire.nc_fuel_file`) |
+| `fire.fuel_model_source` | `uniform` (`fire.uniform_fuel_id`) or `landfire` (`fire.nc_fuel_file`, variable `FBFM` on the fire L0 grid). LANDFIRE fuel is used with atmospheric forcing |
+| `fire.nc_fuel_file_l1`, `fire.nc_ignition_file_l1` | Optional full-domain fields at fire L1 resolution (`FBFM`, `fire_mask`); without them fire L1 takes each value from its fire L0 cell |
 | `fire.band_thickness`, `fire.cfl`, `fire.subcycle_interval` | Narrow-band width, fire CFL, fire update every N ERF steps |
 | `fire_amr.max_level` | Fire levels above fire L0: 0 (default) or 1. Fire levels are the fire model's own (x,y-only refinement) and unrelated to ERF's `amr.*` |
 | `fire_amr.refinement_mode` | Required when `fire_amr.max_level = 1`; only `static` is supported |
@@ -63,15 +64,18 @@ ERF wind from its actual height to the 20-ft height with a log law.
 ## Notes and limitations
 
 - With a fire L1 the fire plotfile is LSFIRE's multi-level format (all fire levels, composite
-  mask, arrival time); heat and vapor go back to ERF from fire L0 only. Fire L1 currently
-  requires `erf.fire_met_source = Constant`, point ignition and uniform fuel.
+  mask, arrival time; in atmospheric mode also the wind and its height on the finest fire
+  level). Every fire level takes the ERF wind, its height and the terrain directly from the
+  ERF cell it lies in. Heat and vapor go back to ERF from fire L0 only.
 - ERF `amr.max_level` must be 0 when the fire is on; ERF level-0 boxes must span the whole
   vertical extent (do not decompose in z).
 - Restart with the fire enabled aborts: fire checkpointing is not implemented yet.
 - Misspellings used by older input templates abort with a message: `fire.bandthickness`
   (use `fire.band_thickness`) and `fire.fire_dt` (not a parameter).
-- Heat feedback is applied explicitly after the dycore, omits the Exner factor
-  (theta vs. T; a few percent near the surface) and uses the instantaneous fire flux.
+- Heat feedback is applied explicitly after the dycore and omits the Exner factor (theta vs.
+  T; a few percent near the surface). The flux returned to ERF is the fire-L0 flux averaged
+  over the last fire update interval (all fire substeps), so the energy given to ERF equals
+  the energy the fire released (checked to ~1e-10 per interval with 5 fire steps per update).
   Off by default; these tests check the coupling, not the physics of the feedback.
 - Atmospheric wind is copied from each ERF cell to the fire cells it covers (no sub-cell
   structure). Its height above ground is passed per column; `wind_height` can be added to

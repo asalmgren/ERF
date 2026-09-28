@@ -15,17 +15,23 @@ namespace {
 // Device kernels live in free functions: nvcc does not allow extended lambdas
 // whose enclosing function is a private/protected member.
 
-// Cell-centred wind at the first cell centre above the bottom face (k=1, as in the
-// original coupling; k=0 faces carry the no-slip wall value).
+// Wind at the lowest cell centre (k = k0), averaged from x/y faces to the cell centre,
+// and its height above ground: z_cc(k0) minus the surface height (mean of the four
+// bottom nodes when nodal heights exist, else 0 for a flat ConstantDz mesh).
 void
-extract_surface_wind (const Box& bx,
+extract_surface_wind (const Box& bx, int k0,
                       const Array4<Real const>& u, const Array4<Real const>& v,
-                      const Array4<Real>& us, const Array4<Real>& vs)
+                      const Array4<Real const>& zcc,
+                      bool use_znd, const Array4<Real const>& znd,
+                      const Array4<Real>& us, const Array4<Real>& vs, const Array4<Real>& hs)
 {
     ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int) noexcept
     {
-        us(i,j,0) = Real(0.5) * (u(i,j,1) + u(i+1,j,1));
-        vs(i,j,0) = Real(0.5) * (v(i,j,1) + v(i,j+1,1));
+        us(i,j,0) = Real(0.5) * (u(i,j,k0) + u(i+1,j,k0));
+        vs(i,j,0) = Real(0.5) * (v(i,j,k0) + v(i,j+1,k0));
+        const Real zsfc = use_znd ? Real(0.25) * (znd(i,j,k0) + znd(i+1,j,k0) + znd(i,j+1,k0) + znd(i+1,j+1,k0))
+                                  : Real(0.0);
+        hs(i,j,0) = zcc(i,j,k0) - zsfc;
     });
 }
 
@@ -110,23 +116,30 @@ ERF::advance_fire_model (int lev, double time, Real dt_lev,
 
     const MultiFab* U_ptr = nullptr;
     const MultiFab* V_ptr = nullptr;
+    const MultiFab* H_ptr = nullptr;   // height above ground of U/V [m]
     if (solverChoice.fire_met_source == FireMetSource::Atmosphere) {
         if (!fire_u_sfc || fire_u_sfc->boxArray() != ba2d) {
             fire_u_sfc = std::make_unique<MultiFab>(ba2d, S_new.DistributionMap(), 1, 1, HostAccessible());
             fire_v_sfc = std::make_unique<MultiFab>(ba2d, S_new.DistributionMap(), 1, 1, HostAccessible());
+            fire_h_sfc = std::make_unique<MultiFab>(ba2d, S_new.DistributionMap(), 1, 1, HostAccessible());
         }
+        const bool use_znd = (z_phys_nd[lev] != nullptr);
         for (MFIter mfi(*fire_u_sfc); mfi.isValid(); ++mfi) {
-            extract_surface_wind(mfi.validbox(), U_new.const_array(mfi), V_new.const_array(mfi),
-                                 fire_u_sfc->array(mfi), fire_v_sfc->array(mfi));
+            const Array4<Real const> znd = use_znd ? z_phys_nd[lev]->const_array(mfi) : Array4<Real const>{};
+            extract_surface_wind(mfi.validbox(), klo, U_new.const_array(mfi), V_new.const_array(mfi),
+                                 z_phys_cc[lev]->const_array(mfi), use_znd, znd,
+                                 fire_u_sfc->array(mfi), fire_v_sfc->array(mfi), fire_h_sfc->array(mfi));
         }
         fire_u_sfc->FillBoundary(geom[lev].periodicity());
         fire_v_sfc->FillBoundary(geom[lev].periodicity());
+        fire_h_sfc->FillBoundary(geom[lev].periodicity());
         U_ptr = fire_u_sfc.get();
         V_ptr = fire_v_sfc.get();
+        H_ptr = fire_h_sfc.get();
     }
 
     Gpu::streamSynchronize();  // device kernels/copies above -> host reads in the fire engine
-    fire_model.Advance(lev, dt_lev, U_ptr, V_ptr, fire_terrain_sfc.get());
+    fire_model.Advance(lev, dt_lev, U_ptr, V_ptr, fire_terrain_sfc.get(), H_ptr);
 
     // ---- Fire -> atmosphere: explicit source in the bottom cell (optional) ----------
     // Kept as in the original coupling for stage 2 (off by default):

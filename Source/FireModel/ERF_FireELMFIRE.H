@@ -67,11 +67,13 @@ public:
      * @param U Wind velocity component (u) from ERF
      * @param V Wind velocity component (v) from ERF
      * @param terrain Terrain elevation
+     * @param wind_height Height above ground of U/V [m] (ignored if fire.atmos_wind_height is set)
      */
     void Advance(const amrex::Real& dt,
                 const amrex::MultiFab* U,
                 const amrex::MultiFab* V,
-                const amrex::MultiFab* terrain) override;
+                const amrex::MultiFab* terrain,
+                const amrex::MultiFab* wind_height) override;
 
     /**
      * @brief Get sensible heat flux from fire (W/m²)
@@ -221,6 +223,8 @@ private:
 
     /// Subcycling parameters (fire runs at larger timestep than atmosphere)
     int m_atmo_step_count = 0;           // Atmospheric steps seen (drives subcycling)
+    amrex::Real m_atmos_wind_height = 0.0;           // fire.atmos_wind_height [m] (if given)
+    bool m_use_atmos_wind_height_override = false;   // true: fixed height instead of ERF's
     int m_subcycle_interval = 1;         // Fire updates every N atmospheric steps (1 = every step)
     amrex::Real m_accumulated_dt = 0.0;  // Accumulated time since last fire update
 
@@ -251,6 +255,7 @@ private:
     /// Prolongated atmospheric wind at fire resolution — stored for fire plotfile output
     amrex::MultiFab m_U_fire_fine;
     amrex::MultiFab m_V_fire_fine;
+    amrex::MultiFab m_H_fire_fine;   // height above ground of that wind [m] (0 if a fixed height is used)
 
     /// 2D coarse BoxArray/DM (khi=0) for proper 2D→2D average_down before expanding to 3D ERF MF
     amrex::BoxArray m_ba_crse_2d;

@@ -94,6 +94,7 @@ void FireELMFIRE::Init(int lev,
 
     // Wind data scale factor
     m_config.wind_data_scale_factor  = m_wind_data_scale_factor;
+    if (m_use_atmos_wind_height_override) { m_config.atmos_wind_height = m_atmos_wind_height; }
     m_config.use_grid_aware_burnout  = m_use_grid_aware_burnout;
     m_config.use_source_fuel_scaling = m_use_source_fuel_scaling;
     m_config.source_fuel_exponent    = m_source_fuel_exponent;
@@ -154,8 +155,10 @@ void FireELMFIRE::Init(int lev,
         m_moist_flux_fine.setVal(0.0);
         m_U_fire_fine.define(m_fire_ba_fine, m_fire_dm_fine, 1, 0, HostAccessible());
         m_V_fire_fine.define(m_fire_ba_fine, m_fire_dm_fine, 1, 0, HostAccessible());
+        m_H_fire_fine.define(m_fire_ba_fine, m_fire_dm_fine, 1, 0, HostAccessible());
         m_U_fire_fine.setVal(0.0);
         m_V_fire_fine.setVal(0.0);
+        m_H_fire_fine.setVal(0.0);
 
         // 2D coarse BA (khi=0): coarsen fire BA in x,y by fire_ref_ratio, z stays 0.
         // Used as intermediate for 2D→2D average_down (avoids OOB z access that
@@ -228,7 +231,8 @@ void FireELMFIRE::Init(int lev,
 void FireELMFIRE::Advance(const amrex::Real& dt,
                          const amrex::MultiFab* U,
                          const amrex::MultiFab* V,
-                         const amrex::MultiFab* terrain)
+                         const amrex::MultiFab* terrain,
+                         const amrex::MultiFab* wind_height_in)
 {
     if (!m_initialized) {
         amrex::Abort("FireELMFIRE::Advance() called before Init()!");
@@ -330,6 +334,16 @@ void FireELMFIRE::Advance(const amrex::Real& dt,
             U_crse.ParallelCopy(*U, 0, 0, 1);
             V_crse.ParallelCopy(*V, 0, 0, 1);
 
+            // Wind height: prolong like the wind (ignored if fire.atmos_wind_height is set)
+            const amrex::MultiFab* wind_height = m_use_atmos_wind_height_override ? nullptr : wind_height_in;
+            const bool have_height = (wind_height != nullptr);
+            amrex::MultiFab height_crse, height_fine;
+            if (have_height) {
+                height_crse.define(ba_c_from_f, dm_c_from_f, 1, 0);
+                height_fine.define(m_fire_ba_fine, m_fire_dm_fine, 1, 0, HostAccessible());
+                height_crse.ParallelCopy(*wind_height, 0, 0, 1);
+            }
+
             // Terrain: prolong from ERF coarse grid to fire fine grid (same as offline)
             const bool have_terrain = (terrain != nullptr);
             amrex::MultiFab terrain_crse, terrain_fine;
@@ -353,6 +367,13 @@ void FireELMFIRE::Advance(const amrex::Real& dt,
                     u_f(i,j,k) = u_c(ic, jc, k);
                     v_f(i,j,k) = v_c(ic, jc, k);
                 });
+                if (have_height) {
+                    auto h_f = height_fine.array(mfi);
+                    const auto h_c = height_crse.const_array(mfi);
+                    amrex::ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept {
+                        h_f(i,j,k) = h_c(i / rr, j / rr, k);
+                    });
+                }
                 if (have_terrain) {
                     auto t_f = terrain_fine.array(mfi);
                     const auto t_c = terrain_crse.const_array(mfi);
@@ -366,14 +387,17 @@ void FireELMFIRE::Advance(const amrex::Real& dt,
             amrex::Gpu::streamSynchronize();  // prolongation kernels -> host reads in the engine
             m_engine->UpdateAtmosphericData(&U_fine, &V_fine,
                                             have_terrain ? &terrain_fine : nullptr,
-                                            fuel_ptr);
+                                            fuel_ptr,
+                                            have_height ? &height_fine : nullptr);
 
             // Store prolongated winds for fire plotfile output (x_velocity / y_velocity)
             amrex::MultiFab::Copy(m_U_fire_fine, U_fine, 0, 0, 1, 0);
             amrex::MultiFab::Copy(m_V_fire_fine, V_fine, 0, 0, 1, 0);
+            if (have_height) { amrex::MultiFab::Copy(m_H_fire_fine, height_fine, 0, 0, 1, 0); }
         } else {
-            // Same resolution: pass ERF wind directly
-            m_engine->UpdateAtmosphericData(U, V, terrain, fuel_ptr);
+            // Same resolution: pass ERF wind (and its height) directly
+            m_engine->UpdateAtmosphericData(U, V, terrain, fuel_ptr,
+                                            m_use_atmos_wind_height_override ? nullptr : wind_height_in);
         }
 
         // Advance fire with accumulated timestep
@@ -557,6 +581,9 @@ void FireELMFIRE::LoadConfigFromSolverChoice(SolverChoice& sc)
     pp.query("constant_wind_u", m_constant_wind_u);
     pp.query("constant_wind_v", m_constant_wind_v);
     pp.query("wind_height", m_wind_height);
+    // Height above ground of the atmospheric wind. Default: the actual height of the ERF
+    // level used (per column); set this only to impose a fixed height (e.g. idealized tests).
+    m_use_atmos_wind_height_override = pp.query("atmos_wind_height", m_atmos_wind_height);
 
     // Fuel moisture
     pp.query("fuel_moisture_1hr", m_fuel_moisture_1hr);
@@ -881,6 +908,8 @@ void FireELMFIRE::WriteFirePlotFile(int step, amrex::Real time) const
         if (var_names[c] == "x_velocity") {
             // Atmospheric U wind prolongated to fire resolution
             amrex::MultiFab::Copy(tmp, m_U_fire_fine, 0, 0, 1, 0);
+        } else if (var_names[c] == "wind_height") {
+            amrex::MultiFab::Copy(tmp, m_H_fire_fine, 0, 0, 1, 0);
         } else if (var_names[c] == "y_velocity") {
             // Atmospheric V wind prolongated to fire resolution
             amrex::MultiFab::Copy(tmp, m_V_fire_fine, 0, 0, 1, 0);

@@ -100,4 +100,43 @@ int FireELMFIRE::read_ignition_from_netcdf(const amrex::Box& domain,
     return success[0];
 }
 
+/**
+ * Read the fire L1 refinement mask: int variable "refine_mask" (Time x South-North x
+ * West-East) on the fire level-0 grid, 1 = refine. Returned on all ranks, x-fastest.
+ */
+int FireELMFIRE::read_refine_mask_from_netcdf(const std::string& fname,
+                                              std::vector<unsigned char>& mask,
+                                              int& nx, int& ny)
+{
+    using namespace amrex;
+
+    Vector<NDArray<int>> nc_arrays(1);
+    Vector<std::string> nc_var_names{"refine_mask"};
+    Vector<int> success(1, 0);
+    ReadTimeSliceFromNetCDFFile<int>(fname, 0, nc_var_names, nc_arrays, success);
+    ParallelDescriptor::Bcast(&success[0], 1, ParallelDescriptor::IOProcessorNumber());
+    if (success[0] == 0) { return 0; }
+
+    if (ParallelDescriptor::IOProcessor()) {
+        std::vector<size_t> shape = nc_arrays[0].get_vshape();
+        AMREX_ALWAYS_ASSERT(shape.size() == 3 && shape[0] == 1);
+        ny = static_cast<int>(shape[1]);
+        nx = static_cast<int>(shape[2]);
+    }
+    ParallelDescriptor::Bcast(&nx, 1, ParallelDescriptor::IOProcessorNumber());
+    ParallelDescriptor::Bcast(&ny, 1, ParallelDescriptor::IOProcessorNumber());
+
+    // NetCDF (south_north, west_east) is already x-fastest
+    mask.assign(static_cast<std::size_t>(nx) * ny, 0);
+    if (ParallelDescriptor::IOProcessor()) {
+        const int* data = nc_arrays[0].get_data();
+        for (std::size_t n = 0; n < mask.size(); ++n) {
+            mask[n] = static_cast<unsigned char>(data[n] != 0 ? 1 : 0);
+        }
+    }
+    ParallelDescriptor::Bcast(reinterpret_cast<char*>(mask.data()), mask.size(),
+                              ParallelDescriptor::IOProcessorNumber());
+    return 1;
+}
+
 #endif // ERF_USE_NETCDF

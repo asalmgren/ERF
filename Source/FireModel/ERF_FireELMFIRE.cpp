@@ -242,23 +242,53 @@ void FireELMFIRE::Init(int lev,
         }
     }
 
-    // Fire-level hierarchy on the fire level-0 grid. Fire levels have no z refinement.
+    // Fire-level hierarchy on the fire level-0 grid (fire levels are unrelated to ERF's
+    // AMR levels). Fire levels refine x,y only; fire level 0 uses the ERF-aligned grids.
     {
         amrex::ParmParse ppa("fire_amr");
-        int fire_max_level = 0;
-        ppa.query("max_level", fire_max_level);
-        if (fire_max_level > 0) {
-            amrex::Abort("fire_amr.max_level > 0 is not supported yet in ERF (Phase 13 step 3)");
+        m_fire_max_level = 0;
+        ppa.query("max_level", m_fire_max_level);
+        if (m_fire_max_level < 0 || m_fire_max_level > 1) {
+            amrex::Abort("fire_amr.max_level must be 0 or 1 (static fire L1)");
         }
+        if (m_fire_max_level > 0) {
+            // Not yet: fire L1 forcing/fuel/area ignition come from fire L0 data (Phase 13 step 4)
+            if (m_fire_mode != "constant_wind") {
+                amrex::Abort("fire_amr.max_level = 1 currently requires erf.fire_met_source = Constant");
+            }
+            if (m_ignition_type == "area" || m_fuel_model_source == "landfire") {
+                amrex::Abort("fire_amr.max_level = 1 currently supports point ignition and uniform fuel only");
+            }
+        }
+        int ref_ratio = 2, blocking_factor = 2, max_grid_size = 64, n_error_buf = 1;
+        ppa.query("ref_ratio", ref_ratio);
+        ppa.query("blocking_factor", blocking_factor);
+        ppa.query("max_grid_size", max_grid_size);
+        ppa.query("n_error_buf", n_error_buf);
+        ppa.query("nc_refine_mask_file", m_nc_refine_mask_file);
+
         amrex::AmrInfo fire_info;
-        fire_info.max_level       = 0;
-        fire_info.ref_ratio       = {amrex::IntVect(2,2,1)};
-        fire_info.blocking_factor = {amrex::IntVect(1,1,1)};  // level-0 grids are prescribed
-        fire_info.max_grid_size   = {amrex::IntVect(1024,1024,1)};
-        fire_info.n_error_buf     = {amrex::IntVect(1,1,0)};
+        fire_info.max_level = m_fire_max_level;
+        fire_info.ref_ratio.assign(m_fire_max_level + 1, amrex::IntVect(ref_ratio, ref_ratio, 1));
+        fire_info.blocking_factor.assign(m_fire_max_level + 1, amrex::IntVect(blocking_factor, blocking_factor, 1));
+        fire_info.max_grid_size.assign(m_fire_max_level + 1, amrex::IntVect(max_grid_size, max_grid_size, 1));
+        fire_info.n_error_buf.assign(m_fire_max_level + 1, amrex::IntVect(n_error_buf, n_error_buf, 0));
         m_hier = std::make_unique<ERFFireHierarchy>(*fire_geom_ptr, fire_info, m_config,
                                                     m_ignition_x, m_ignition_y,
                                                     m_ignition_radius, m_ignition_time);
+
+        if (!m_nc_refine_mask_file.empty()) {
+#ifdef ERF_USE_NETCDF
+            std::vector<unsigned char> mask;
+            int nx = 0, ny = 0;
+            if (read_refine_mask_from_netcdf(m_nc_refine_mask_file, mask, nx, ny) == 0) {
+                amrex::Abort("Failed to read refine_mask from fire_amr.nc_refine_mask_file = " + m_nc_refine_mask_file);
+            }
+            m_hier->SetStaticRefineMask(mask, nx, ny);   // checks size against fire level 0
+#else
+            amrex::Abort("fire_amr.nc_refine_mask_file requires NetCDF support (ERF_USE_NETCDF)");
+#endif
+        }
     }
 
 #ifdef ERF_USE_NETCDF
@@ -929,8 +959,21 @@ void FireELMFIRE::ReadCheckpointData(const std::string& chk_dir, int lev)
 
 void FireELMFIRE::WriteFirePlotFile(int step, amrex::Real time) const
 {
-    // Only write when ELMFIRE runs at finer resolution than ERF
-    if (!m_initialized || m_fire_ref_ratio <= 1 || !m_hier) return;
+    if (!m_initialized || !m_hier) return;
+
+    // With a fire L1: the hierarchy's multi-level plotfile (all fire levels, composite
+    // mask, arrival time), same format as LSFIRE elmfire_amr output.
+    if (m_fire_max_level > 0) {
+        const std::string pltname = amrex::Concatenate(m_fire_plot_file, step, 7);
+        if (amrex::ParallelDescriptor::IOProcessor()) {
+            amrex::Print() << "Fire: writing multi-level fire plotfile " << pltname << " (t = " << time << " s)\n";
+        }
+        m_hier->WritePlotFile(pltname);
+        return;
+    }
+
+    // Single fire level: only when the fire runs at finer resolution than ERF
+    if (m_fire_ref_ratio <= 1) return;
 
     if (amrex::ParallelDescriptor::IOProcessor()) {
         amrex::Print() << "Fire: WriteFirePlotFile: step=" << step << " time=" << time << "\n";

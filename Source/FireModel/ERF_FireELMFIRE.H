@@ -325,7 +325,20 @@ private:
                                          const std::string& fname,
                                          int time_index,
                                          amrex::IArrayBox& NC_ign_iab);
+
+    /**
+     * @brief Read the fire L1 refinement mask (variable refine_mask, Time x SN x WE,
+     *        on the fire level-0 grid, 1 = refine) on all ranks, x-fastest.
+     * @return 1 if successful, 0 if failed
+     */
+    static int read_refine_mask_from_netcdf(const std::string& fname,
+                                            std::vector<unsigned char>& mask,
+                                            int& nx, int& ny);
 #endif
+
+    /// Fire-level hierarchy settings (fire_amr.*): fire L1 on a static refine mask
+    int m_fire_max_level = 0;
+    std::string m_nc_refine_mask_file;
 
 
     /**

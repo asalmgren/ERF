@@ -1,0 +1,66 @@
+# ------------------  ERF + LSFIRE: static fire L1 from a NetCDF refine mask  -------------------
+# Equivalent to LSFIRE examples/standalone_amr/inputs_two_disconnected_50_10m:
+#   ERF 60 x 30 x 4 @ 100 m; fire L0 = fire_ref_ratio 2 -> 120 x 60 @ 50 m; fire L1 ratio 5 -> 10 m.
+# The fire updates every 9 ERF steps of 0.5 s = 4.5 s = its own L0 step (0.9 * 50 m / 10 m/s).
+erf.prob_name = "ABL"
+max_step = 7200                 # 1 h
+geometry.prob_extent = 6000 3000 400
+amr.n_cell           = 60 30 4
+geometry.is_periodic = 1 1 0
+zlo.type = "NoSlipWall"
+zhi.type = "SlipWall"
+erf.fixed_dt = 0.5
+erf.v = 0
+amr.v = 0
+amr.max_level = 0
+erf.check_int = -1
+erf.plot_file_1 = plt
+erf.plot_int_1  = 1200          # 600 s; the fire plotfile is written at the same steps
+erf.plot_vars_1 = density fire_phi
+erf.use_gravity = false
+erf.molec_diff_type = "None"
+erf.les_type = "None"
+erf.init_type = "uniform"
+prob.rho_0 = 1.0
+prob.T_0 = 300.0
+prob.U_0 = 0.0
+prob.V_0 = 0.0
+
+erf.fire_type = "ELMFIRE"
+erf.fire_met_source = "Constant"
+erf.fire_heat_feedback = false
+fire.fire_ref_ratio = 2
+fire.subcycle_interval = 9
+fire.fire_plot_file = "fire_plt"
+fire.cfl = 0.9
+fire.band_thickness = 5
+fire.fuel_model_source = "uniform"
+fire.uniform_fuel_id = 102
+fire.fuel_database_path = "fuel_models.csv"
+fire.constant_wind_u = 4.89
+fire.constant_wind_v = 0.0
+fire.wind_height = 10.0
+fire.fuel_moisture_1hr = 0.03
+fire.fuel_moisture_10hr = 0.03
+fire.fuel_moisture_100hr = 0.03
+fire.fuel_moisture_live_herb = 0.30
+fire.fuel_moisture_live_woody = 0.60
+fire.uniform_slope_x = 0.0
+fire.uniform_slope_y = 0.0
+fire.wind_data_scale_factor = 0.7
+fire.ignition_type = "point"
+fire.ignition_x = 500.0
+fire.ignition_y = 1500.0
+fire.ignition_time = 0.0
+fire.verbosity = 1
+
+# fire levels (unrelated to ERF amr.*)
+fire_amr.max_level = 1
+fire_amr.refinement_mode = static
+fire_amr.ref_ratio = 5
+fire_amr.blocking_factor = 2
+fire_amr.max_grid_size = 64
+fire_amr.n_error_buf = 2
+fire_amr.nc_refine_mask_file = "refine_mask_two_disconnected.nc"
+fire_amr.phi_buffer = 100.0
+fire_amr.fuel_frac_threshold = 0.01

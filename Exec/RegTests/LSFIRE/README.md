@@ -32,6 +32,7 @@ All cases: ERF level 0 is 60 x 30 x 4 cells at 100 m; `fire.fire_ref_ratio = 10`
 |---|---|---|
 | `inputs_lsfire_constant_wind` | `erf.fire_met_source = Constant`: the ERF wrapper does not change the fire model | Equal to LSFIRE `elmfire_amr` with one fire level on the same 10 m grid and the same fire inputs (phi within 1e-9, identical burned cells at 1 h and 6 h). Burned area 318,900 m^2 at 1 h, 11,092,600 m^2 at 6 h. ~5 min. |
 | `inputs_lsfire_atmos_wind` | `erf.fire_met_source = Atmosphere`: ERF surface wind drives the fire | Uniform 4.89 m/s at the lowest ERF cell centre (50 m above ground) reaches every fire cell; at 1 h burned area 146,700 m^2, head fire downwind. With `fire.atmos_wind_height=50` the result is bitwise identical; with `fire.atmos_wind_height=46.875` it reproduces the value before the k = 0 change (commit 036ad2e9e and earlier: k = 1 wind, fixed 46.875 m), 149,100 m^2. ~70 s. |
+| `inputs_lsfire_fire_L1_mask` | Static fire L1 (ratio 5, 10 m) from `refine_mask_two_disconnected.nc` over fire L0 (`fire_ref_ratio = 2`, 50 m); fire updated every 9 ERF steps (= its 4.5 s L0 step) | Equal to LSFIRE `elmfire_amr` `inputs_two_disconnected_50_10m` (same mask): at 1800 s and 3600 s phi, fuel fraction, arrival time, composite mask identical on both fire levels (L1 1319 burned cells at 1 h). Plotted fluxes are interval means and differ only by the averaging window. ~1 min. |
 | `inputs_lsfire_heat_feedback` | `erf.fire_heat_feedback = true` with `MoistNoCondensation` | Domain integrals of rho*theta and rho*qv increase by exactly Sum(P dt)/Cp_d and Sum(E dt) (relative difference ~1e-11), with P and E the applied heat power and vapor rate printed every step (`erf.v = 2`). ~16 s. |
 
 The fire advances with its own level-0 step (`fire.cfl` x fire dx / 10 m/s), clipped to the end
@@ -54,9 +55,16 @@ ERF wind from its actual height to the 20-ft height with a log law.
 | `fire.fire_ref_ratio` | Fire grid refinement relative to ERF level 0 (x and y). The fire grid uses the ERF level-0 boxes refined by this ratio, on the same MPI ranks. |
 | `fire.fuel_model_source` | `uniform` (`fire.uniform_fuel_id`) or `landfire` (`fire.nc_fuel_file`) |
 | `fire.band_thickness`, `fire.cfl`, `fire.subcycle_interval` | Narrow-band width, fire CFL, fire update every N ERF steps |
+| `fire_amr.max_level` | Fire levels above fire L0: 0 (default) or 1. Fire levels are the fire model's own (x,y-only refinement) and unrelated to ERF's `amr.*` |
+| `fire_amr.refinement_mode` | Required when `fire_amr.max_level = 1`; only `static` is supported |
+| `fire_amr.nc_refine_mask_file` | NetCDF with int `refine_mask(Time, south_north, west_east)` on the fire L0 grid, 1 = build fire L1 there (alternatives read by LSFIRE: `fire_amr.static_corridor_*`, `fire_amr.static_polyline_file`) |
+| `fire_amr.ref_ratio`, `fire_amr.blocking_factor`, `fire_amr.max_grid_size`, `fire_amr.n_error_buf` | Fire L1 ratio (x,y) and grid generation settings (defaults 2, 2, 64, 1) |
 
 ## Notes and limitations
 
+- With a fire L1 the fire plotfile is LSFIRE's multi-level format (all fire levels, composite
+  mask, arrival time); heat and vapor go back to ERF from fire L0 only. Fire L1 currently
+  requires `erf.fire_met_source = Constant`, point ignition and uniform fuel.
 - ERF `amr.max_level` must be 0 when the fire is on; ERF level-0 boxes must span the whole
   vertical extent (do not decompose in z).
 - Restart with the fire enabled aborts: fire checkpointing is not implemented yet.

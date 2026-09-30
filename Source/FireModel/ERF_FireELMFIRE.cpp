@@ -139,12 +139,16 @@ protected:
     {
         if (m_atmospheric) { names.push_back("x_velocity"); names.push_back("y_velocity"); names.push_back("wind_height"); }
     }
+    // Called for any fire level (LSFIRE may ask for every level): find the level by layout
     void FillExtraPlotVar (const std::string& name, amrex::MultiFab& mf) const override
     {
-        const int lev = finest_level;
-        const amrex::MultiFab* src = (name == "x_velocity") ? LevelWindU(lev)
-                                   : (name == "y_velocity") ? LevelWindV(lev) : LevelWindHeight(lev);
-        if (src != nullptr) { amrex::MultiFab::Copy(mf, *src, 0, 0, 1, 0); }
+        for (int lev = 0; lev <= finest_level; ++lev) {
+            if (mf.boxArray() != boxArray(lev) || mf.DistributionMap() != DistributionMap(lev)) { continue; }
+            const amrex::MultiFab* src = (name == "x_velocity") ? LevelWindU(lev)
+                                       : (name == "y_velocity") ? LevelWindV(lev) : LevelWindHeight(lev);
+            if (src != nullptr) { amrex::MultiFab::Copy(mf, *src, 0, 0, 1, 0); }
+            return;
+        }
     }
 
     void AdvanceLevel (int lev, amrex::Real time, amrex::Real dt) override

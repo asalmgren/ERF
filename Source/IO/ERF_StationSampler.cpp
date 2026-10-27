@@ -469,6 +469,10 @@ StationSampler::writeHeader (const Station& station, std::ostream& os) const
         if (with_height) {
             os << ", height=" << height
                << (station_heights_are_agl ? " m above local terrain" : " m (absolute, model z)");
+            if (height < loc.first_cc_height) {
+                os << " -- below the first cell centre, so sampled there, at height="
+                   << loc.first_cc_height << " m when this file was started";
+            }
         }
         if (var.is_missing) { os << "  [NOT AVAILABLE in this run: constant " << var.missing_value << "]"; }
         os << "\n";
@@ -488,6 +492,10 @@ StationSampler::writeHeader (const Station& station, std::ostream& os) const
     os << "# Values are bilinearly interpolated in the horizontal and linearly\n";
     os << "# interpolated in the vertical, from the finest level that covers the\n";
     os << "# interpolation stencil.\n";
+    os << "# A requested height below the first cell centre of that level is\n";
+    os << "# reported as the value at the first cell centre; the columns where that\n";
+    os << "# happens say so above.  Their sampled height is the one when this file\n";
+    os << "# was started, and can change if regridding changes the level sampled from.\n";
 }
 
 //
@@ -737,6 +745,12 @@ ERF::init_stations ()
                 if (containerHasElement(available_2d, var.name)) {
                     if (!containerHasElement(requested_2d, var.name)) {
                         requested_2d.push_back(var.name);
+                    }
+                    // Its cells may hold the plotfile's -999 where the diagnostic
+                    // could not be formed; the interpolation leaves those out.
+                    if (descriptor->missing_policy == plotfile2d::MissingPolicy::FillMinus999WhenUnavailable) {
+                        var.cells_may_be_missing = true;
+                        var.missing_value = Real(-999.0);
                     }
                 } else {
                     // Same convention as the 2D plotfile: a diagnostic that this
@@ -1106,6 +1120,7 @@ ERF::resolve_station_stencils ()
     // computed the same stencils above.
     //
     Vector<int> chosen(2*nloc, -1);
+    Vector<Real> first_cc(nloc, Real(0.0));
 
     if (ParallelDescriptor::IOProcessor())
     {
@@ -1185,6 +1200,7 @@ ERF::resolve_station_stencils ()
                 if (usable) {
                     chosen[2*ip] = lev;
                     chosen[2*ip+1] = ktop;
+                    first_cc[ip] = z_of_k(klo) - z_zero;
 
                     // Nothing in the model lives between the terrain and the first
                     // cell centre, so a height there is the first cell centre's
@@ -1206,6 +1222,7 @@ ERF::resolve_station_stencils ()
     }
 
     ParallelDescriptor::Bcast(chosen.data(), chosen.size(), io_rank);
+    ParallelDescriptor::Bcast(first_cc.data(), first_cc.size(), io_rank);
 
     for (int ip = 0; ip < nloc; ++ip)
     {
@@ -1222,6 +1239,7 @@ ERF::resolve_station_stencils ()
         loc.i1 = c.i1; loc.j1 = c.j1;
         loc.wx = c.wx; loc.wy = c.wy;
         loc.ktop = chosen[2*ip+1];
+        loc.first_cc_height = first_cc[ip];
     }
 
     station_sampler->rememberStencilGrids(grids, finest_level);
@@ -1456,7 +1474,16 @@ ERF::sample_stations (Real time)
                 for (const auto& var : station.vars) {
                     if (!var.is_2d) { continue; }
                     const int gcol = station.columns[icol++];
-                    row[gcol] = var.is_missing ? var.missing_value : bilinear(a2, var.comp, 0);
+                    if (var.is_missing) {
+                        row[gcol] = var.missing_value;
+                    } else if (var.cells_may_be_missing) {
+                        row[gcol] = station_bilinear_skip_missing(
+                            a2(i0,j0,0,var.comp), a2(i1,j0,0,var.comp),
+                            a2(i0,j1,0,var.comp), a2(i1,j1,0,var.comp),
+                            wx, wy, var.missing_value);
+                    } else {
+                        row[gcol] = bilinear(a2, var.comp, 0);
+                    }
                 }
 
                 const Real z_zero = station.heights_are_agl ? z_surf : Real(0.0);

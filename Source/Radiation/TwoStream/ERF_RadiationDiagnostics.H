@@ -91,7 +91,7 @@ public:
    * @param[in] diag_callsite_mode Call-site filter: "both", "pre_only", "post_only".
    * @param[in] diag_dedup_tol Tolerance for time equality in duplicate guard.
    */
-  RadiationDiagnostics(int verbosity, const std::string& diag_file, int amr_level,
+  RadiationDiagnostics (int verbosity, const std::string& diag_file, int amr_level,
                       bool diag_enable = true, bool diag_stdout_enable = true,
                       bool diag_tagged_enable = true, bool diag_regtest_line_enable = true,
                       bool diag_csv_enable = true, const std::string& diag_callsite_mode = "both",
@@ -100,7 +100,7 @@ public:
   /**
    * @brief Destructor.
    */
-  ~RadiationDiagnostics();
+  ~RadiationDiagnostics ();
 
   /**
    * @brief Append a diagnostic row to the CSV file.
@@ -131,10 +131,10 @@ public:
    * @param[in] seb_residual_max  [optional] Max SEB residual [W/m^2]; if non-finite, not written.
    * @param[in] t_s_mean          [optional] Mean surface temperature [K]; if non-finite, written as NaN.
    * @param[in] t_s_max           [optional] Max surface temperature [K]; if non-finite, written as NaN.
-   * @param[in] q_s_mean          [optional] Mean surface moisture [kg/kg]; if non-finite, written as NaN.
-   * @param[in] q_s_max           [optional] Max surface moisture [kg/kg]; if non-finite, written as NaN.
+   * @param[in] q_s_mean          [optional] Mean prognostic soil moisture [m^3/m^3]; if non-finite, written as NaN.
+   * @param[in] q_s_max           [optional] Max prognostic soil moisture [m^3/m^3]; if non-finite, written as NaN.
    */
-  void append(int step, amrex::Real time, std::string const& call_site,
+  void append (int step, amrex::Real time, std::string const& call_site,
             amrex::Real sw_surface, amrex::Real sw_toa, amrex::Real sw_up_toa,
             amrex::Real lw_net_surface, amrex::Real lw_up_toa,
             amrex::Real heating_rate_max,
@@ -149,7 +149,7 @@ private:
   /**
    * @brief Write CSV header if file is new or doesn't exist.
    */
-  void write_header_if_needed();
+  void write_header_if_needed ();
 
   int m_verbosity;              ///< Debug verbosity level
   std::string m_diag_file;      ///< Output CSV file path

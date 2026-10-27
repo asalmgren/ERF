@@ -5,15 +5,16 @@
 #include "ERF_Constants.H"
 #include "ERF_EpochTime.H"
 #include "ERF_NCPlotFile.H"
+#include "ERF_NoahMPGitHash.H"
 #include "ERF_PlotfileSelection.H"
 #include "ERF_SrcHeaders.H"
 #include "ERF_StormDiagnostics.H"
 #include "ERF_TerrainMetrics.H"
 #include "ERF_Utils.H"
+#include <AMReX_buildInfo.H>
 
 using namespace amrex;
 
-static PhysBCFunctNoOp null_bc_for_fill;
 
 void
 ERF::setPlotVariables (const std::string& pp_plot_var_names, Vector<std::string>& plot_var_names)
@@ -265,11 +266,10 @@ ERF::appendPlot3DVariables (const Vector<std::string>& plot_var_names,
     }
 
 #ifdef ERF_USE_FIRE
-    // Fire variables: only those explicitly requested; filled last in FillPlot3DVars
-    if (solverChoice.fire_type != FireType::None) {
-        Vector<std::string> fire_plot_names;
-        fire_model.GetPlotVarNames(fire_plot_names);
-        for (auto& plot_name : fire_plot_names) {
+    // The fire engine's fields, at k = 0 of the fire grid's level; filled last
+    // in FillPlot3DVars, in this order
+    if (m_fire_coupler) {
+        for (const auto& plot_name : m_fire_coupler->plot_var_names()) {
             if (containerHasElement(plot_var_names, plot_name) &&
                 !containerHasElement(tmp_plot_names, plot_name)) {
                 tmp_plot_names.push_back(plot_name);
@@ -998,9 +998,9 @@ ERF::FillPlot3DVars (int lev,
             const Array4<Real      >&   derdat  = mf_dst.array(mfi);
             const Array4<Real const>&   gpx_arr = (solverChoice.anelastic[lev] == 1) ?
                   gradp[lev][GpVars::gpx].array(mfi) : gradp_temp[GpVars::gpx].array(mfi);
-            const Array4<Real const>& mf_mx_arr = mapfac[lev][MapFacType::m_x]->const_array(mfi);
+            // NOTE: gradp already carries the map factor, so we only average here
             ParallelFor(bx, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept {
-                derdat(i ,j ,k, mf_comp) = myhalf * (gpx_arr(i+1,j,k) + gpx_arr(i,j,k)) * mf_mx_arr(i,j,0);
+                derdat(i ,j ,k, mf_comp) = myhalf * (gpx_arr(i+1,j,k) + gpx_arr(i,j,k));
             });
         }
         mf_comp ++;
@@ -1013,9 +1013,9 @@ ERF::FillPlot3DVars (int lev,
             const Array4<Real      >&   derdat  = mf_dst.array(mfi);
             const Array4<Real const>&   gpy_arr = (solverChoice.anelastic[lev] == 1) ?
                   gradp[lev][GpVars::gpy].array(mfi) : gradp_temp[GpVars::gpy].array(mfi);
-            const Array4<Real const>& mf_my_arr = mapfac[lev][MapFacType::m_y]->const_array(mfi);
+            // NOTE: gradp already carries the map factor, so we only average here
             ParallelFor(bx, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept {
-                derdat(i ,j ,k, mf_comp) = myhalf * (gpy_arr(i,j+1,k) + gpy_arr(i,j,k)) * mf_my_arr(i,j,0);
+                derdat(i ,j ,k, mf_comp) = myhalf * (gpy_arr(i,j+1,k) + gpy_arr(i,j,k));
             });
         }
         mf_comp ++;
@@ -1052,9 +1052,9 @@ ERF::FillPlot3DVars (int lev,
             const Box& bx = mfi.tilebox();
             const Array4<Real      >&  derdat  = mf_dst.array(mfi);
             const Array4<Real const>&  gpx_arr = gradp_temp[0].array(mfi);
-            const Array4<Real const>& mf_mx_arr = mapfac[lev][MapFacType::m_x]->const_array(mfi);
+            // NOTE: gradp already carries the map factor, so we only average here
             ParallelFor(bx, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept {
-                derdat(i ,j ,k, mf_comp) = myhalf * (gpx_arr(i+1,j,k) + gpx_arr(i,j,k)) * mf_mx_arr(i,j,0);
+                derdat(i ,j ,k, mf_comp) = myhalf * (gpx_arr(i+1,j,k) + gpx_arr(i,j,k));
             });
         }
         mf_comp += 1;
@@ -1067,9 +1067,9 @@ ERF::FillPlot3DVars (int lev,
             const Box& bx = mfi.tilebox();
             const Array4<Real      >&  derdat  = mf_dst.array(mfi);
             const Array4<Real const>&  gpy_arr = gradp_temp[1].array(mfi);
-            const Array4<Real const>& mf_my_arr = mapfac[lev][MapFacType::m_y]->const_array(mfi);
+            // NOTE: gradp already carries the map factor, so we only average here
             ParallelFor(bx, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept {
-                derdat(i ,j ,k, mf_comp) = myhalf * (gpy_arr(i,j+1,k) + gpy_arr(i,j,k)) * mf_my_arr(i,j,0);
+                derdat(i ,j ,k, mf_comp) = myhalf * (gpy_arr(i,j+1,k) + gpy_arr(i,j,k));
             });
         }
         mf_comp += 1;
@@ -1415,6 +1415,11 @@ ERF::FillPlot3DVars (int lev,
         MultiFab::Copy(mf_dst,*eddyDiffs_lev[lev],EddyDiff::RANS_cmu_prime,mf_comp,1,0);
         mf_comp ++;
     }
+    if (containerHasElement(plot_var_names, "cap_ratio")) {
+        AMREX_ALWAYS_ASSERT(eddyDiffs_lev[lev] != nullptr);
+        MultiFab::Copy(mf_dst,*eddyDiffs_lev[lev],EddyDiff::RANS_cap_ratio,mf_comp,1,0);
+        mf_comp ++;
+    }
     auto copy_native_shoc_diagnostic = [&](const MultiFab* src) {
         if (src != nullptr) {
             MultiFab::Copy(mf_dst, *src, 0, mf_comp, 1, 0);
@@ -1423,12 +1428,36 @@ ERF::FillPlot3DVars (int lev,
         }
         mf_comp ++;
     };
-    // Native SHOC pblh is diagnosed in meters AGL and is copied through
-    // unchanged into the plotfile diagnostic field.
+    // The boundary layer height in meters AGL.  Native SHOC carries its own
+    // column-filled diagnostic; every other scheme gets it from the surface
+    // layer, which diagnoses it whenever erf.most.pblh_calc is set (MYNN25
+    // computes it directly, MRF/YSU/YSUNew write theirs back via set_pblh).
+    // That field is two-dimensional, so broadcast it down each column.
     if (containerHasElement(plot_var_names, "pblh")) {
-        copy_native_shoc_diagnostic(have_native_shoc_diagnostics
-                                    ? &native_shoc_driver[lev]->pblh_diagnostics()
-                                    : nullptr);
+        const auto& surf_lay_zlo = m_SurfaceLayer[Orientation(Direction::z, Orientation::low)];
+        if (have_native_shoc_diagnostics) {
+            copy_native_shoc_diagnostic(&native_shoc_driver[lev]->pblh_diagnostics());
+        } else if (surf_lay_zlo && surf_lay_zlo->computes_pblh()) {
+            const MultiFab* pblh_mf = surf_lay_zlo->get_pblh(lev);
+            const int dcomp = mf_comp;
+#ifdef _OPENMP
+#pragma omp parallel if (Gpu::notInLaunchRegion())
+#endif
+            for (MFIter mfi(mf_dst, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+                const Box& bx = mfi.tilebox();
+                auto       dst = mf_dst.array(mfi);
+                auto const src = pblh_mf->const_array(mfi);
+                ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+                {
+                    dst(i,j,k,dcomp) = src(i,j,0);
+                });
+            }
+            mf_comp ++;
+        } else {
+            // No PBL height is being diagnosed; keep the -999 sentinel so the
+            // field is not mistaken for a real value.
+            copy_native_shoc_diagnostic(nullptr);
+        }
     }
     if (containerHasElement(plot_var_names, "shoc_cldfrac")) {
         copy_native_shoc_diagnostic(have_native_shoc_diagnostics
@@ -1743,169 +1772,6 @@ ERF::FillPlot3DVars (int lev,
         mf_comp += 1;
     }
 
-#ifdef ERF_COMPUTE_ERROR
-    // Next, check for error in velocities and if desired, output them -- note we output none or all, not just some
-    if (containerHasElement(plot_var_names, "xvel_err") ||
-        containerHasElement(plot_var_names, "yvel_err") ||
-        containerHasElement(plot_var_names, "zvel_err"))
-    {
-        //
-        // Moving terrain ANALYTICAL
-        //
-        Real H           = geom[lev].ProbHi()[2];
-        Real Ampl        = Real(0.16);
-        Real wavelength  = Real(100.);
-        Real kp          = two * PI / wavelength;
-        Real g           = CONST_GRAV;
-        Real omega       = std::sqrt(g * kp);
-        Real omega_t     = omega * t_new[lev];
-
-        const auto dx = geom[lev].CellSizeArray();
-
-#ifdef _OPENMP
-#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
-#endif
-        for (MFIter mfi(mf_dst, TilingIfNotGPU()); mfi.isValid(); ++mfi)
-        {
-            const Box& bx = mfi.validbox();
-            Box xbx(bx); xbx.surroundingNodes(0);
-            const Array4<Real> xvel_arr = vars_new[lev][Vars::xvel].array(mfi);
-            const Array4<Real> zvel_arr = vars_new[lev][Vars::zvel].array(mfi);
-
-            const Array4<Real const>& z_nd = z_phys_nd[lev]->const_array(mfi);
-
-            ParallelFor(xbx, [=] AMREX_GPU_DEVICE (int i, int j, int k)
-            {
-                Real x = i * dx[0];
-                Real z = fourth * (z_nd(i,j,k) + z_nd(i,j+1,k) + z_nd(i,j,k+1) + z_nd(i,j+1,k+1));
-
-                Real z_base = Ampl * std::sin(kp * x - omega_t);
-                z -= z_base;
-
-                Real fac = std::cosh( kp * (z - H) ) / std::sinh(kp * H);
-
-                xvel_arr(i,j,k) -= -Ampl * omega * fac * std::sin(kp * x - omega_t);
-            });
-
-            ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k)
-            {
-                Real x   = (i + myhalf) * dx[0];
-                Real z   = fourth * ( z_nd(i,j,k) + z_nd(i+1,j,k) + z_nd(i,j+1,k) + z_nd(i+1,j+1,k));
-
-                Real z_base = Ampl * std::sin(kp * x - omega_t);
-                z -= z_base;
-
-                Real fac = std::sinh( kp * (z - H) ) / std::sinh(kp * H);
-
-                zvel_arr(i,j,k) -= Ampl * omega * fac * std::cos(kp * x - omega_t);
-            });
-        }
-
-        MultiFab temp_mf(mf_dst.boxArray(), mf_dst.DistributionMap(), AMREX_SPACEDIM, 0);
-        average_face_to_cellcenter(temp_mf,0,
-            Array<const MultiFab*,3>{&vars_new[lev][Vars::xvel],&vars_new[lev][Vars::yvel],&vars_new[lev][Vars::zvel]});
-
-        if (containerHasElement(plot_var_names, "xvel_err")) {
-            MultiFab::Copy(mf_dst,temp_mf,0,mf_comp,1,0);
-            mf_comp += 1;
-        }
-        if (containerHasElement(plot_var_names, "yvel_err")) {
-            MultiFab::Copy(mf_dst,temp_mf,1,mf_comp,1,0);
-            mf_comp += 1;
-        }
-        if (containerHasElement(plot_var_names, "zvel_err")) {
-            MultiFab::Copy(mf_dst,temp_mf,2,mf_comp,1,0);
-            mf_comp += 1;
-        }
-
-        // Now restore the velocities to what they were
-#ifdef _OPENMP
-#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
-#endif
-        for (MFIter mfi(mf_dst, TilingIfNotGPU()); mfi.isValid(); ++mfi)
-        {
-            const Box& bx = mfi.validbox();
-            Box xbx(bx); xbx.surroundingNodes(0);
-
-            const Array4<Real> xvel_arr = vars_new[lev][Vars::xvel].array(mfi);
-            const Array4<Real> zvel_arr = vars_new[lev][Vars::zvel].array(mfi);
-
-            const Array4<Real const>& z_nd = z_phys_nd[lev]->const_array(mfi);
-
-            ParallelFor(xbx, [=] AMREX_GPU_DEVICE (int i, int j, int k)
-            {
-                Real x = i * dx[0];
-                Real z = fourth * (z_nd(i,j,k) + z_nd(i,j+1,k) + z_nd(i,j,k+1) + z_nd(i,j+1,k+1));
-                Real z_base = Ampl * std::sin(kp * x - omega_t);
-
-                z -= z_base;
-
-                Real fac = std::cosh( kp * (z - H) ) / std::sinh(kp * H);
-                xvel_arr(i,j,k) += -Ampl * omega * fac * std::sin(kp * x - omega_t);
-            });
-            ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k)
-            {
-                Real x   = (i + myhalf) * dx[0];
-                Real z   = fourth * ( z_nd(i,j,k) + z_nd(i+1,j,k) + z_nd(i,j+1,k) + z_nd(i+1,j+1,k));
-                Real z_base = Ampl * std::sin(kp * x - omega_t);
-
-                z -= z_base;
-                Real fac = std::sinh( kp * (z - H) ) / std::sinh(kp * H);
-
-                zvel_arr(i,j,k) += Ampl * omega * fac * std::cos(kp * x - omega_t);
-            });
-        }
-    } // end xvel_err, yvel_err, zvel_err
-
-    if (containerHasElement(plot_var_names, "pp_err"))
-    {
-        // Moving terrain ANALYTICAL
-#ifdef _OPENMP
-#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
-#endif
-        for ( MFIter mfi(mf_dst,TilingIfNotGPU()); mfi.isValid(); ++mfi)
-        {
-            const Box& bx = mfi.tilebox();
-            const Array4<Real>& derdat = mf_dst.array(mfi);
-            const Array4<Real const>& p0_arr = p_hse.const_array(mfi);
-            const Array4<Real const>& S_arr = vars_new[lev][Vars::cons].const_array(mfi);
-
-            const auto dx = geom[lev].CellSizeArray();
-            const Array4<Real const>& z_nd = z_phys_nd[lev]->const_array(mfi);
-            const Array4<Real const>&  p_arr = pressure.const_array(mfi);
-            const Array4<Real const>& r0_arr = r_hse.const_array(mfi);
-
-            Real H           = geom[lev].ProbHi()[2];
-            Real Ampl        = Real(0.16);
-            Real wavelength  = Real(100.);
-            Real kp          = two * PI / wavelength;
-            Real g           = CONST_GRAV;
-            Real omega       = std::sqrt(g * kp);
-            Real omega_t     = omega * t_new[lev];
-
-            ParallelFor(bx, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept
-            {
-                derdat(i, j, k, mf_comp) = p_arr(i,j,k) - p0_arr(i,j,k);
-
-                Real rho_hse     = r0_arr(i,j,k);
-
-                Real x   = (i + myhalf) * dx[0];
-                Real z   = Real(0.125) * ( z_nd(i,j,k  ) + z_nd(i+1,j,k  ) + z_nd(i,j+1,k  ) + z_nd(i+1,j+1,k  )
-                                    +z_nd(i,j,k+1) + z_nd(i+1,j,k+1) + z_nd(i,j+1,k+1) + z_nd(i+1,j+1,k+1) );
-                Real z_base = Ampl * std::sin(kp * x - omega_t);
-
-                z -= z_base;
-                Real fac = std::cosh( kp * (z - H) ) / std::sinh(kp * H);
-                Real pprime_exact = -(Ampl * omega * omega / kp) * fac *
-                                          std::sin(kp * x - omega_t) * r0_arr(i,j,k);
-
-                derdat(i,j,k,mf_comp) -= pprime_exact;
-            });
-        }
-        mf_comp += 1;
-    }
-#endif
-
     if (solverChoice.rad_type != RadiationType::None) {
         if (containerHasElement(plot_var_names, "qsrc_sw") ||
             containerHasElement(plot_var_names, "qsrc_lw")) {
@@ -2073,20 +1939,11 @@ ERF::FillPlot3DVars (int lev,
     }
 
 #ifdef ERF_USE_FIRE
-    // Must match the order used in appendPlot3DVariables (after microphysics)
-    if (solverChoice.fire_type != FireType::None) {
-        Vector<std::string> fire_plot_names;
-        fire_model.GetPlotVarNames(fire_plot_names);
-        for (auto& plot_name : fire_plot_names) {
+    // Must match the order of appendPlot3DVariables (after microphysics)
+    if (m_fire_coupler) {
+        for (const auto& plot_name : m_fire_coupler->plot_var_names()) {
             if (containerHasElement(plot_var_names, plot_name)) {
-                // host-accessible: the fire engine fills plot variables in host loops
-                MultiFab temp_dat(mf_dst.boxArray(), mf_dst.DistributionMap(), 1, 0,
-                                  MFInfo().SetArena(The_Managed_Arena()));
-                temp_dat.setVal(0);
-                Gpu::streamSynchronize();  // setVal kernel before host writes
-                if (lev == 0) { fire_model.GetPlotVar(plot_name, temp_dat, lev); } // fire lives on ERF level 0
-                Gpu::streamSynchronize();
-                MultiFab::Copy(mf_dst, temp_dat, 0, mf_comp, 1, 0);
+                m_fire_coupler->fill_plot_var(plot_name, mf_dst, mf_comp, lev);
                 mf_comp += 1;
             }
         }
@@ -2291,9 +2148,11 @@ ERF::Write3DPlotFile (int which, PlotFileType plotfile_type, Vector<std::string>
              const Real* p_lo = geom[lev].ProbLo();
              const Real* p_hi = geom[lev].ProbHi();
              const auto dx    = geom[lev].CellSize();
+             const NCProvenance nc_provenance{buildInfoGetGitHash(1), buildInfoGetGitHash(2), NoahMPGitHash()};
              writeNCPlotFile(lev, l_which, plotfilename, GetVecOfConstPtrs(mf), varnames, istep,
                              {p_lo[0],p_lo[1],p_lo[2]},{p_hi[0],p_hi[1],p_hi[2]}, {dx[0],dx[1],dx[2]},
-                             geom[lev].Domain(), tnew, start_bdy_time, solverChoice, zlevels_stag[lev]);
+                             geom[lev].Domain(), tnew, start_bdy_time, solverChoice, zlevels_stag[lev],
+                             nc_provenance);
 #endif
         } else {
             // Here we assume the plotfile_type is PlotFileType::None
@@ -2304,119 +2163,32 @@ ERF::Write3DPlotFile (int which, PlotFileType plotfile_type, Vector<std::string>
 
         if (plotfile_type == PlotFileType::Amrex) {
 
-            int lev0 = 0;
-            int desired_ratio = std::max(std::max(ref_ratio[lev0][0],ref_ratio[lev0][1]),ref_ratio[lev0][2]);
-            bool any_ratio_one = ( ( (ref_ratio[lev0][0] == 1) || (ref_ratio[lev0][1] == 1) ) ||
-                                     (ref_ratio[lev0][2] == 1) );
-            for (int lev = 1; lev < finest_level; lev++) {
-                any_ratio_one = any_ratio_one ||
-                                     ( ( (ref_ratio[lev][0] == 1) || (ref_ratio[lev][1] == 1) ) ||
-                                         (ref_ratio[lev][2] == 1) );
-            }
-
-            if (any_ratio_one && m_expand_plotvars_to_unif_rr)
-            {
-                Vector<IntVect>   r2(finest_level);
-                Vector<Geometry>  g2(finest_level+1);
-                Vector<MultiFab> mf2(finest_level+1);
-
-                mf2[0].define(grids[0], dmap[0], ncomp_mf, 0);
-
-                // Copy level 0 as is
-                MultiFab::Copy(mf2[0],mf[0],0,0,mf[0].nComp(),0);
-
-                // Define a new multi-level array of Geometry's so that we pass the new "domain" at lev > 0
-                Array<int,AMREX_SPACEDIM> periodicity =
-                             {Geom()[lev0].isPeriodic(0),Geom()[lev0].isPeriodic(1),Geom()[lev0].isPeriodic(2)};
-                g2[lev0].define(Geom()[lev0].Domain(),&(Geom()[lev0].ProbDomain()),0,periodicity.data());
-
-                r2[0] = IntVect(desired_ratio/ref_ratio[lev0][0],
-                                desired_ratio/ref_ratio[lev0][1],
-                                desired_ratio/ref_ratio[lev0][2]);
-
-                for (int lev = 1; lev <= finest_level; ++lev) {
-                    if (lev > 1) {
-                        r2[lev-1][0] = r2[lev-2][0] * desired_ratio / ref_ratio[lev-1][0];
-                        r2[lev-1][1] = r2[lev-2][1] * desired_ratio / ref_ratio[lev-1][1];
-                        r2[lev-1][2] = r2[lev-2][2] * desired_ratio / ref_ratio[lev-1][2];
-                    }
-
-                    mf2[lev].define(refine(grids[lev],r2[lev-1]), dmap[lev], ncomp_mf, 0);
-
-                    // Set the new problem domain
-                    Box d2(Geom()[lev].Domain());
-                    d2.refine(r2[lev-1]);
-
-                    g2[lev].define(d2,&(Geom()[lev].ProbDomain()),0,periodicity.data());
-                }
-
-                //
-                // We need to make a temporary that is the size of ncomp_mf
-                // in order to not get an out of bounds error
-                // even though the values will not be used
-                //
-                Vector<BCRec> temp_domain_bcs_type;
-                temp_domain_bcs_type.resize(ncomp_mf);
-
-                //
-                // Do piecewise constant interpolation of mf into mf2
-                //
-                for (int lev = 1; lev <= finest_level; ++lev) {
-                    Interpolater* mapper_c = &pc_interp;
-                    InterpFromCoarseLevel(mf2[lev], static_cast<Real>(t_new[lev]), mf[lev],
-                                          0, 0, ncomp_mf,
-                                          geom[lev], g2[lev],
-                                          null_bc_for_fill, 0, null_bc_for_fill, 0,
-                                          r2[lev-1], mapper_c, temp_domain_bcs_type, 0);
-                }
-
-                // Define an effective ref_ratio which is isotropic to be passed into WriteMultiLevelPlotfile
-                Vector<IntVect> rr(finest_level);
-                for (int lev = 0; lev < finest_level; ++lev) {
-                    rr[lev] = IntVect(desired_ratio);
-                }
-
-               Print() << "Writing 3D plotfile " << plotfilename << "\n";
-               if (SolverChoice::mesh_type != MeshType::ConstantDz) {
-                   WriteMultiLevelPlotfileWithTerrain(plotfilename, finest_level+1,
-                                                      GetVecOfConstPtrs(mf2),
-                                                      GetVecOfConstPtrs(mf_nd),
-                                                      varnames,
-                                                      g2, tnew, istep, rr);
-               } else {
-                   WriteMultiLevelPlotfile(plotfilename, finest_level+1,
-                                           GetVecOfConstPtrs(mf2), varnames,
-                                           g2, tnew, istep, rr);
-               }
-
+            if (SolverChoice::mesh_type != MeshType::ConstantDz) {
+                WriteMultiLevelPlotfileWithTerrain(plotfilename, finest_level+1,
+                                                   GetVecOfConstPtrs(mf),
+                                                   GetVecOfConstPtrs(mf_nd),
+                                                   varnames,
+                                                   geom, tnew, istep, ref_ratio);
             } else {
-               if (SolverChoice::mesh_type != MeshType::ConstantDz) {
-                    WriteMultiLevelPlotfileWithTerrain(plotfilename, finest_level+1,
-                                                       GetVecOfConstPtrs(mf),
-                                                       GetVecOfConstPtrs(mf_nd),
-                                                       varnames,
-                                                       geom, tnew, istep, ref_ratio);
-                } else {
-                    WriteMultiLevelPlotfile(plotfilename, finest_level+1,
-                                            GetVecOfConstPtrs(mf), varnames,
-                                            geom, tnew, istep, ref_ratio);
-                }
-                if (m_plot_face_vels) {
-                    Print() << "Writing face velocities" << std::endl;
-                    WriteMultiLevelPlotfile(plotfilenameU, finest_level+1,
-                                            GetVecOfConstPtrs(mf_u),
-                                            {"x_velocity_stag"},
-                                            geom, tnew, istep, ref_ratio);
-                    WriteMultiLevelPlotfile(plotfilenameV, finest_level+1,
-                                            GetVecOfConstPtrs(mf_v),
-                                            {"y_velocity_stag"},
-                                            geom, tnew, istep, ref_ratio);
-                    WriteMultiLevelPlotfile(plotfilenameW, finest_level+1,
-                                            GetVecOfConstPtrs(mf_w),
-                                            {"z_velocity_stag"},
-                                            geom, tnew, istep, ref_ratio);
-                }
-            } // ref_ratio test
+                WriteMultiLevelPlotfile(plotfilename, finest_level+1,
+                                        GetVecOfConstPtrs(mf), varnames,
+                                        geom, tnew, istep, ref_ratio);
+            }
+            if (m_plot_face_vels) {
+                Print() << "Writing face velocities" << std::endl;
+                WriteMultiLevelPlotfile(plotfilenameU, finest_level+1,
+                                        GetVecOfConstPtrs(mf_u),
+                                        {"x_velocity_stag"},
+                                        geom, tnew, istep, ref_ratio);
+                WriteMultiLevelPlotfile(plotfilenameV, finest_level+1,
+                                        GetVecOfConstPtrs(mf_v),
+                                        {"y_velocity_stag"},
+                                        geom, tnew, istep, ref_ratio);
+                WriteMultiLevelPlotfile(plotfilenameW, finest_level+1,
+                                        GetVecOfConstPtrs(mf_w),
+                                        {"z_velocity_stag"},
+                                        geom, tnew, istep, ref_ratio);
+            }
 
             writeJobInfo(plotfilename, erf_provenance::ArtifactType::Plotfile3D,
                          istep[0], t_new[0]);
@@ -2434,9 +2206,11 @@ ERF::Write3DPlotFile (int which, PlotFileType plotfile_type, Vector<std::string>
                      const Real* p_lo = geom[lev].ProbLo();
                      const Real* p_hi = geom[lev].ProbHi();
                      const auto dx    = geom[lev].CellSizeArray();
+                     const NCProvenance nc_provenance{buildInfoGetGitHash(1), buildInfoGetGitHash(2), NoahMPGitHash()};
                      writeNCPlotFile(lev, which_box, plotfilename, GetVecOfConstPtrs(mf), varnames, istep,
                                      {p_lo[0],p_lo[1],p_lo[2]},{p_hi[0],p_hi[1],p_hi[2]}, {dx[0],dx[1],dx[2]},
-                                     bounding_region, tnew, start_bdy_time, solverChoice, zlevels_stag[lev]);
+                                     bounding_region, tnew, start_bdy_time, solverChoice, zlevels_stag[lev],
+                                     nc_provenance);
                  }
              }
 #endif

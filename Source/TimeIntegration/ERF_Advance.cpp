@@ -1,6 +1,7 @@
 #include <ERF.H>
 #include "ERF_Constants.H"
 #include <ERF_Utils.H>
+#include "Microphysics/SBM/ERF_SBMStateManager.H"
 
 #ifdef ERF_USE_WINDFARM
 #include <ERF_WindFarm.H>
@@ -25,9 +26,19 @@ ERF::Advance (int lev, double time, double dt_lev, int iteration, int /*ncycle*/
     // We must swap the pointers so the previous step's "new" is now this step's "old"
     std::swap(vars_old[lev], vars_new[lev]);
 
-    // Surface energy balance on the building faces, with the state at the start of the step
-    ibseb_advance(lev, time, dt_lev, vars_old[lev][Vars::cons],
-                  vars_old[lev][Vars::xvel], vars_old[lev][Vars::yvel], vars_old[lev][Vars::zvel]);
+    if (sbm_state_manager) {
+        std::string diagnostic;
+        if (!sbm_state_manager->begin_step(lev, time, diagnostic)) {
+            Abort("SBM state lifecycle at ERF::Advance: " + diagnostic);
+        }
+    }
+
+    // Surface energy balance on the building faces, with the state at the start of the step.
+    // With the two-stream columns as their radiation it runs after advance_radiation below.
+    if (!ibseb_after_radiation()) {
+        ibseb_advance(lev, time, dt_lev, vars_old[lev][Vars::cons],
+                      vars_old[lev][Vars::xvel], vars_old[lev][Vars::yvel], vars_old[lev][Vars::zvel]);
+    }
 
     MultiFab& S_old = vars_old[lev][Vars::cons];
     MultiFab& S_new = vars_new[lev][Vars::cons];
@@ -58,21 +69,6 @@ ERF::Advance (int lev, double time, double dt_lev, int iteration, int /*ncycle*/
                            base_state[lev], base_state[lev]);
     }
 
-    //
-    // So we must convert the fillpatched to momenta, including the ghost values
-    //
-    const MultiFab* c_vfrac = nullptr;
-    if (solverChoice.terrain_type == TerrainType::EB) {
-        c_vfrac = &((get_eb(lev).get_const_factory())->getVolFrac());
-    }
-
-    VelocityToMomentum(U_old, rU_old[lev].nGrowVect(),
-                       V_old, rV_old[lev].nGrowVect(),
-                       W_old, rW_old[lev].nGrowVect(),
-                       S_old, rU_old[lev], rV_old[lev], rW_old[lev],
-                       Geom(lev).Domain(),
-                       domain_bcs_type, c_vfrac);
-
     // Update the inflow perturbation update time and amplitude
     if (solverChoice.use_perturbation(lev))
     {
@@ -91,6 +87,8 @@ ERF::Advance (int lev, double time, double dt_lev, int iteration, int /*ncycle*/
                 const Array4<const Real> &pert_cell = turbPert.pb_cell[lev].array(mfi);
                 turbPert.apply_tpi(lev, bx, -1, m_ixtype, cell_data, pert_cell);
             }
+            // apply_tpi only modifies valid faces; refresh the ghost faces so they agree (see below)
+            (*physbcs_w[lev])(W_old, U_old, V_old, W_old.nGrowVect(), time, BCVars::zvel_bc, true);
         } else {
             auto m_ixtype = S_old.boxArray().ixType(); // Conserved term
             for (MFIter mfi(S_old,TileNoZ()); mfi.isValid(); ++mfi) {
@@ -99,8 +97,32 @@ ERF::Advance (int lev, double time, double dt_lev, int iteration, int /*ncycle*/
                 const Array4<const Real> &pert_cell = turbPert.pb_cell[lev].array(mfi);
                 turbPert.apply_tpi(lev, bx, RhoTheta_comp, m_ixtype, cell_data, pert_cell);
             }
+            // apply_tpi only modifies valid cells, but the ghost cells must agree with them:
+            //   the first RK stage reads them across box boundaries, and the next finer
+            //   level's FillPatchTwoLevels copies coarse ghost cells as well as valid ones,
+            //   so a stale ghost overlapping another box's valid cell would make the fine
+            //   ghost data depend on copy order (issue 4304).
+            (*physbcs_cons[lev])(S_old, U_old, V_old, RhoTheta_comp, 1, S_old.nGrowVect(),
+                                 time, BCVars::cons_bc, true);
         }
     }
+
+    //
+    // So we must convert the fillpatched to momenta, including the ghost values.
+    // This comes after the inflow perturbation above, since the dycore advances the
+    //    momenta: a CPM_W perturbation of W_old must reach rW_old
+    //
+    const MultiFab* c_vfrac = nullptr;
+    if (solverChoice.terrain_type == TerrainType::EB) {
+        c_vfrac = &((get_eb(lev).get_const_factory())->getVolFrac());
+    }
+
+    VelocityToMomentum(U_old, rU_old[lev].nGrowVect(),
+                       V_old, rV_old[lev].nGrowVect(),
+                       W_old, rW_old[lev].nGrowVect(),
+                       S_old, rU_old[lev], rV_old[lev], rW_old[lev],
+                       Geom(lev).Domain(),
+                       domain_bcs_type, c_vfrac);
 
     // configure SurfaceLayer params if needed
     bool updated_prim = false;
@@ -138,6 +160,7 @@ ERF::Advance (int lev, double time, double dt_lev, int iteration, int /*ncycle*/
 #else
             double elapsed_time_since_start_low = time;
 #endif
+            if (static_cast<int>(ori) == Orientation::zlo()) { set_surface_layer_skin(lev); }
             m_SurfaceLayer[ori]->update_fluxes(lev, time, elapsed_time_since_start_low,
                                                S_old, z_phys_nd[lev], walldist[lev]);
         }
@@ -160,6 +183,16 @@ ERF::Advance (int lev, double time, double dt_lev, int iteration, int /*ncycle*/
     // **************************************************************************************
     advance_radiation(lev, S_old, dt_lev);
 
+    // The building faces on this step's two-stream sweep (erf.ibseb.radiation = two_stream),
+    // with the state at the start of the step that the sweep saw: after any direct inflow
+    // perturbation above, and with the ground surface layer's Obukhov length and boundary-layer
+    // height of this step's update_fluxes (the call at the start of the step sees the previous
+    // step's).
+    if (ibseb_after_radiation()) {
+        ibseb_advance(lev, time, dt_lev, vars_old[lev][Vars::cons],
+                      vars_old[lev][Vars::xvel], vars_old[lev][Vars::yvel], vars_old[lev][Vars::zvel]);
+    }
+
     // **************************************************************************************
     // Update the "old" state using SHOC
     // **************************************************************************************
@@ -170,7 +203,7 @@ ERF::Advance (int lev, double time, double dt_lev, int iteration, int /*ncycle*/
             m_SurfaceLayer[Orientation::zlo()]->impose_SurfaceLayer_bcs(lev, mfs, Tau[lev],
                                                                         SFS_hfx1_lev[lev].get() , SFS_hfx2_lev[lev].get() , SFS_hfx3_lev[lev].get(),
                                                                         SFS_q1fx1_lev[lev].get(), SFS_q1fx2_lev[lev].get(), SFS_q1fx3_lev[lev].get(),
-                                                                        z_phys_nd[lev].get());
+                                                                        z_phys_nd[lev].get(), &mfvec_surface_fluxes[lev]);
         }
 
         // Apply SHOC before the dycore so it sees a coherent state.
@@ -347,13 +380,6 @@ ERF::Advance (int lev, double time, double dt_lev, int iteration, int /*ncycle*/
         }
     }
 
-#ifdef ERF_USE_FIRE
-    // **************************************************************************************
-    // Update the fire model (ERF level 0 only) and optionally feed its fluxes back
-    // **************************************************************************************
-    advance_fire_model(lev, time, dt_lev, S_new, U_new, V_new);
-#endif
-
     // **************************************************************************************
     // Update the land surface model
     // **************************************************************************************
@@ -467,6 +493,24 @@ ERF::Advance (int lev, double time, double dt_lev, int iteration, int /*ncycle*/
         Time_Avg_Vel_atCC(dt[lev], t_avg_cnt[lev], vel_t_avg[lev].get(), U_new, V_new, W_new);
     }
 
+#ifdef ERF_USE_FIRE
+    // Advance the fire on the level its grid refines (erf.fire.anchor_level).
+    // The coupler hands the engine the wind (before the dycore with passive and
+    // lagged coupling, after it with synchronous), the air temperature and
+    // humidity at k = 0 from the state before the dycore and, when the engine
+    // asks for it, the surface precipitation accumulated through this step's
+    // microphysics; it then holds the engine's fluxes for the next step.
+    if (m_fire_coupler && lev == m_fire_coupler->level()) {
+        const SurfacePrecipAccumulationSources precip_sources =
+            micro ? micro->Get_Surface_Precip_Accumulation_Ptrs(lev)
+                  : SurfacePrecipAccumulationSources{};
+        m_fire_coupler->advance(time, dt_lev, S_old,
+                                vars_old[lev][Vars::xvel], vars_old[lev][Vars::yvel],
+                                vars_new[lev][Vars::xvel], vars_new[lev][Vars::yvel],
+                                *z_phys_cc[lev], ba2d[lev], Geom(lev), precip_sources);
+    }
+#endif
+
     // ***********************************************************************************************
     // Two-stream radiation, post-dycore call: reports the cached flux
     // diagnostics and advances the force-restore surface state by dt_lev.
@@ -483,6 +527,11 @@ ERF::Advance (int lev, double time, double dt_lev, int iteration, int /*ncycle*/
         const MultiFab* t_surf = (m_SurfaceLayer[Orientation::zlo()])
                                ? m_SurfaceLayer[Orientation::zlo()]->get_t_surf(lev)
                                : nullptr;
+        // The fluxes the surface layer applied to the air during this step: the
+        // H and LE the force-restore update removes from the ground.
+        const MultiFab* sfc_sens_flux = nullptr;
+        const MultiFab* sfc_laten_flux = nullptr;
+        seb_surface_layer_fluxes(lev, sfc_sens_flux, sfc_laten_flux);
         Vector<const MultiFab*> radiation_inputs(6, nullptr);
         const bool noahmp_active = solverChoice.lsm_type == LandSurfaceType::NOAHMP;
         if (m_SurfaceModel) {
@@ -492,7 +541,7 @@ ERF::Advance (int lev, double time, double dt_lev, int iteration, int /*ncycle*/
                                vars_old[lev][Vars::cons], z_phys_nd[lev].get(), geom[lev],
                                lsm, radiation_inputs, noahmp_active,
                                qheating_rates[lev].get(), rad_fluxes[lev].get(),
-                               t_surf, lat_ptr, lon_ptr,
+                               t_surf, sfc_sens_flux, sfc_laten_flux, lat_ptr, lon_ptr,
                                time + dt_lev + start_time, use_datetime);
     }
     if (solverChoice.compute_mean_vars) {

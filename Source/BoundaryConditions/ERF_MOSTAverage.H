@@ -54,7 +54,7 @@ public:
      *
      * @param[in] other source object
      */
-    MOSTAverage& operator=(MOSTAverage&& other)  noexcept = delete;
+    MOSTAverage& operator= (MOSTAverage&& other)  noexcept = delete;
 
     /**
      * Deleted copy constructor.
@@ -68,7 +68,7 @@ public:
      *
      * @param[in] other source object
      */
-    MOSTAverage& operator=(const MOSTAverage& other) = delete;
+    MOSTAverage& operator= (const MOSTAverage& other) = delete;
 
     /**
      * Make MOST-average data structures at one level.
@@ -385,6 +385,17 @@ public:
                                            const int& k)
     {
         return myhalf * (zlevels[k] + zlevels[k+1]) - zlevels[0];
+    }
+
+    /**
+     * Height of the top of the column above its bottom, on a column of staggered
+     * (face) heights; the high z face's distances are measured from it.
+     *
+     * @param[in] zlevels staggered heights of the column (nz+1 faces)
+     */
+    static amrex::Real column_height (const amrex::Vector<amrex::Real>& zlevels)
+    {
+        return zlevels.back() - zlevels[0];
     }
 
     /**

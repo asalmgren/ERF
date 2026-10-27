@@ -11,7 +11,7 @@
 
 AMREX_FORCE_INLINE
 AMREX_GPU_HOST_DEVICE
-int get_single_index(int i, int j, int k,
+int get_single_index (int i, int j, int k,
              int nx, int ny)
 {
 
@@ -30,6 +30,19 @@ int clamp_interp_index (int idx, int npts)
     return amrex::max(0, amrex::min(idx, npts - 2));
 }
 
+// Lower index of the uniform-spacing interval holding x. A singleton
+// dimension returns 0 before dividing, since its spacing is 0 or NaN.
+AMREX_FORCE_INLINE
+AMREX_GPU_HOST_DEVICE
+int get_interp_index (amrex::Real x, amrex::Real x0, amrex::Real dx, int npts)
+{
+    if (npts <= 1) {
+        return 0;
+    }
+
+    return clamp_interp_index(static_cast<int>(std::floor((x - x0) / dx)), npts);
+}
+
 AMREX_FORCE_INLINE
 AMREX_GPU_HOST_DEVICE
 amrex::Real get_interp_weight (amrex::Real x, amrex::Real xlo, amrex::Real xhi)
@@ -39,7 +52,7 @@ amrex::Real get_interp_weight (amrex::Real x, amrex::Real xlo, amrex::Real xhi)
 
 AMREX_FORCE_INLINE
 AMREX_GPU_HOST_DEVICE
-void bilinear_interpolation(const amrex::Real* xvec, const amrex::Real* yvec, const amrex::Real* zvec,
+void bilinear_interpolation (const amrex::Real* xvec, const amrex::Real* yvec, const amrex::Real* zvec,
                 const amrex::Real dxvec, const amrex::Real dyvec,
                 const int nx, const int ny, const int nz,
                 const amrex::Real x, const amrex::Real y, const amrex::Real z,
@@ -47,11 +60,8 @@ void bilinear_interpolation(const amrex::Real* xvec, const amrex::Real* yvec, co
                 amrex::Real& tmp_var)
 {
 
-    if(z < amrex::Real(0)){
-        tmp_var = amrex::Real(0);
-        return;
-    }
-
+    // Points outside the table, including heights below zvec[0], take the value at the
+    // nearest table edge; a negative z inside the table is interpolated like any other
     amrex::Real x_interp = x;
     amrex::Real y_interp = y;
     amrex::Real z_interp = z;
@@ -65,8 +75,8 @@ void bilinear_interpolation(const amrex::Real* xvec, const amrex::Real* yvec, co
     if (z_interp < zvec[0]) z_interp = zvec[0];
     if (z_interp > zvec[nz-1]) z_interp = zvec[nz-1];
 
-    int iloc = clamp_interp_index(static_cast<int>(std::floor((x_interp - xvec[0]) / dxvec)), nx);
-    int jloc = clamp_interp_index(static_cast<int>(std::floor((y_interp - yvec[0]) / dyvec)), ny);
+    int iloc = get_interp_index(x_interp, xvec[0], dxvec, nx);
+    int jloc = get_interp_index(y_interp, yvec[0], dyvec, ny);
 
     int kloc = 0;
     if (nz > 1) {
@@ -110,7 +120,7 @@ void bilinear_interpolation(const amrex::Real* xvec, const amrex::Real* yvec, co
 
 AMREX_GPU_DEVICE
 inline
-amrex::Real interpolate_from_coarse(const amrex::Array4<const amrex::Real>& crse,
+amrex::Real interpolate_from_coarse (const amrex::Array4<const amrex::Real>& crse,
                        int n,
                        amrex::Real x, amrex::Real y, amrex::Real z,
                        const amrex::Real* prob_lo_crse,
@@ -153,7 +163,7 @@ amrex::Real interpolate_from_coarse(const amrex::Array4<const amrex::Real>& crse
 
 AMREX_FORCE_INLINE
 AMREX_GPU_HOST_DEVICE
-void bilinear_interpolation_2d(const amrex::Real* xvec, const amrex::Real* yvec,
+void bilinear_interpolation_2d (const amrex::Real* xvec, const amrex::Real* yvec,
                             const amrex::Real dxvec, const amrex::Real dyvec,
                             const int nx, const int ny,
                             amrex::Real x, amrex::Real y,
@@ -174,8 +184,8 @@ void bilinear_interpolation_2d(const amrex::Real* xvec, const amrex::Real* yvec,
             y = yvec[ny-1];
         }
 
-        int iloc = clamp_interp_index(static_cast<int>(std::floor((x-xvec[0])/dxvec)), nx);
-        int jloc = clamp_interp_index(static_cast<int>(std::floor((y-yvec[0])/dyvec)), ny);
+        int iloc = get_interp_index(x, xvec[0], dxvec, nx);
+        int jloc = get_interp_index(y, yvec[0], dyvec, ny);
         int ihi = (nx > 1) ? iloc + 1 : iloc;
         int jhi = (ny > 1) ? jloc + 1 : jloc;
 

@@ -494,12 +494,11 @@ SHOCInterface::mf_to_kokkos_buffers ()
             pseudo_dens_d(icol,ilay) = r * CONST_GRAV * delz;
             // Enforce the grid spacing
             dz_d(icol,ilay) = delz;
-            // Surface geopotential
+            // Surface geopotential: the height of the ground under the column, the
+            // average of the four surface nodes (not the first cell centre)
             if (k==0) {
-                Real z = (z_arr) ? Real(0.125) * ( (z_arr(i  ,j  ,k+1) + z_arr(i  ,j  ,k))
-                                                 + (z_arr(i+1,j  ,k+1) + z_arr(i+1,j  ,k))
-                                                 + (z_arr(i  ,j+1,k+1) + z_arr(i  ,j+1,k))
-                                                 + (z_arr(i+1,j+1,k+1) + z_arr(i+1,j+1,k)) ) : ProbLoArr[2];
+                Real z = (z_arr) ? Real(0.25) * ( z_arr(i  ,j  ,k) + z_arr(i+1,j  ,k)
+                                                + z_arr(i  ,j+1,k) + z_arr(i+1,j+1,k) ) : ProbLoArr[2];
                 phis_d(icol) = CONST_GRAV * z;
             }
 
@@ -775,7 +774,7 @@ SHOCInterface::add_slow_tend (const MFIter& mfi,
 
 
 size_t
-SHOCInterface::requested_buffer_size_in_bytes() const
+SHOCInterface::requested_buffer_size_in_bytes () const
 {
     using TPF = ekat::TeamPolicyFactory<KT::ExeSpace>;
 
@@ -799,7 +798,7 @@ SHOCInterface::requested_buffer_size_in_bytes() const
 
 
 void
-SHOCInterface::init_buffers()
+SHOCInterface::init_buffers ()
 {
 
     // Buffer of contiguous memory
@@ -1127,7 +1126,7 @@ SHOCInterface::finalize_impl (const double dt)
 
 
 void
-SHOCInterface::apply_turbulent_mountain_stress()
+SHOCInterface::apply_turbulent_mountain_stress ()
 {
     auto rrho_i   = m_buffer.rrho_i;
     auto upwp_sfc = m_buffer.upwp_sfc;
@@ -1149,7 +1148,7 @@ SHOCInterface::apply_turbulent_mountain_stress()
 
 
 void
-SHOCInterface::check_flux_state_consistency(const double dt)
+SHOCInterface::check_flux_state_consistency (const double dt)
 {
     using PC  = scream::physics::Constants<Real>;
     using RU  = ekat::ReductionUtils<KT::ExeSpace>;

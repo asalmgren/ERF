@@ -4,6 +4,40 @@
 
 using namespace amrex;
 
+namespace {
+
+/**
+ * Index range over which WFromOmega's stencil stays inside the arrays it reads:
+ * z_nd at i-2..i+3 and j-2..j+3, u and mf_u at i and i+1, v and mf_v at j and j+1,
+ * and u, v at k-1 and k (k and k+1 at k == 0).  A ghost cell of w outside this range is filled with the
+ * value at the nearest index inside it.
+ */
+struct WFromOmegaRange { int ilo, ihi, jlo, jhi, klo, khi; };
+
+WFromOmegaRange
+wfromomega_range (const Array4<Real const>& u, const Array4<Real const>& v,
+                  const Array4<Real const>& mf_u, const Array4<Real const>& mf_v,
+                  const Array4<Real const>& z_nd)
+{
+    // lbound/ubound are inclusive
+    const auto ul = lbound(u),    uh = ubound(u),    vl = lbound(v),    vh = ubound(v);
+    const auto ml = lbound(mf_u), mh = ubound(mf_u), nl = lbound(mf_v), nh = ubound(mf_v);
+    const auto zl = lbound(z_nd), zh = ubound(z_nd);
+    WFromOmegaRange r;
+    r.ilo = std::max({ul.x, vl.x, ml.x, nl.x, zl.x + 2});
+    r.ihi = std::min({uh.x - 1, vh.x, mh.x - 1, nh.x, zh.x - 3});
+    r.jlo = std::max({ul.y, vl.y, ml.y, nl.y, zl.y + 2});
+    r.jhi = std::min({uh.y, vh.y - 1, mh.y, nh.y - 1, zh.y - 3});
+    r.klo = std::max({ul.z + 1, vl.z + 1, zl.z});
+    r.khi = std::min({uh.z, vh.z, zh.z});
+    // Above the bottom it reads u, v at k-1 and k; at k == 0 it extrapolates from k and k+1
+    if (ul.z <= 0 && vl.z <= 0 && zl.z <= 0) { r.klo = std::min(r.klo, 0); }
+    return r;
+}
+
+}
+
+
 /**
  * Impose lateral boundary conditions on z-component of velocity
  *
@@ -34,6 +68,23 @@ void ERFPhysBCFunct_w::impose_lateral_zvel_bcs (const Array4<Real      >& dest_a
     BL_PROFILE_VAR("impose_lateral_zvel_bcs()",impose_lateral_zvel_bcs);
     const auto& dom_lo = lbound(domain);
     const auto& dom_hi = ubound(domain);
+
+    //
+    // An ext_dir_upwind face decides inflow against the face velocity, but the box we
+    // loop over does not always have a face velocity at every one of its cells: the
+    // state carries one more lateral ghost than the velocities do (ngrow_state =
+    // ComputeGhostCells()+1 against ngrow_vels = ComputeGhostCells()), and a velocity
+    // box is nodal in its own direction where the array being read is cell centered.
+    // Either way the outermost ghost cells have no velocity of their own, so sample
+    // the nearest one that exists. Cells already inside the velocity array are
+    // unaffected; only that outermost layer changes, and it previously read out of
+    // bounds.
+    //
+    const auto& xvel_lo = lbound(xvel_arr);
+    const auto& xvel_hi = ubound(xvel_arr);
+    const auto& yvel_lo = lbound(yvel_arr);
+    const auto& yvel_hi = ubound(yvel_arr);
+    const WFromOmegaRange wr = wfromomega_range(xvel_arr, yvel_arr, mf_u, mf_v, z_phys_nd);
 
     // Based on BCRec for the domain, we need to make BCRec for this Box
     // bccomp is used as starting index for m_domain_bcs_type
@@ -75,13 +126,14 @@ void ERFPhysBCFunct_w::impose_lateral_zvel_bcs (const Array4<Real      >& dest_a
         Box bx_xhi(bx);  bx_xhi.setSmall(0,dom_hi.x+1);
         ParallelFor(bx_xlo, bx_xhi,
             [=] AMREX_GPU_DEVICE (int i, int j, int k) {
-                int iflip = dom_lo.x - 1 - i;
+                int iflip = 2*dom_lo.x - 1 - i;
                 if ( (bc_ptr_w[0].lo(0) == ERFBCType::ext_dir) ||
-                     (bc_ptr_w[0].lo(0) == ERFBCType::ext_dir_upwind && xvel_arr(dom_lo.x,j,k) >= zero) )
+                     (bc_ptr_w[0].lo(0) == ERFBCType::ext_dir_upwind && xvel_arr(dom_lo.x,Clamp(j,xvel_lo.y,xvel_hi.y),Clamp(k,xvel_lo.z,xvel_hi.z)) >= zero) )
                 {
                     dest_arr(i,j,k) = (zvel_bc_ptr) ? zvel_bc_ptr[k] : l_bc_extdir_vals_d[0][0];
                     if (l_use_terrain_fitted_coords) {
-                        dest_arr(i,j,k) = WFromOmega(i,j,k,dest_arr(i,j,k),
+                        int wi = Clamp(i,wr.ilo,wr.ihi), wj = Clamp(j,wr.jlo,wr.jhi), wk = Clamp(k,wr.klo,wr.khi);
+                        dest_arr(i,j,k) = WFromOmega(wi,wj,wk,dest_arr(i,j,k),
                                                      xvel_arr,yvel_arr,
                                                      mf_u,mf_v,z_phys_nd,dxInv);
                     }
@@ -98,11 +150,12 @@ void ERFPhysBCFunct_w::impose_lateral_zvel_bcs (const Array4<Real      >& dest_a
             [=] AMREX_GPU_DEVICE (int i, int j, int k) {
                 int iflip = 2*dom_hi.x + 1 - i;
                 if ( (bc_ptr_w[0].hi(0) == ERFBCType::ext_dir) ||
-                     (bc_ptr_w[0].hi(0) == ERFBCType::ext_dir_upwind && xvel_arr(dom_hi.x+1,j,k) <= zero) )
+                     (bc_ptr_w[0].hi(0) == ERFBCType::ext_dir_upwind && xvel_arr(dom_hi.x+1,Clamp(j,xvel_lo.y,xvel_hi.y),Clamp(k,xvel_lo.z,xvel_hi.z)) <= zero) )
                 {
                     dest_arr(i,j,k) = (zvel_bc_ptr) ? zvel_bc_ptr[k] : l_bc_extdir_vals_d[0][3];
                     if (l_use_terrain_fitted_coords) {
-                        dest_arr(i,j,k) = WFromOmega(i,j,k,dest_arr(i,j,k),
+                        int wi = Clamp(i,wr.ilo,wr.ihi), wj = Clamp(j,wr.jlo,wr.jhi), wk = Clamp(k,wr.klo,wr.khi);
+                        dest_arr(i,j,k) = WFromOmega(wi,wj,wk,dest_arr(i,j,k),
                                                      xvel_arr,yvel_arr,
                                                      mf_u,mf_v,z_phys_nd,dxInv);
                     }
@@ -127,13 +180,14 @@ void ERFPhysBCFunct_w::impose_lateral_zvel_bcs (const Array4<Real      >& dest_a
         Box bx_yhi(bx);  bx_yhi.setSmall(1,dom_hi.y+1);
         ParallelFor(bx_ylo, bx_yhi,
             [=] AMREX_GPU_DEVICE (int i, int j, int k) {
-                int jflip = dom_lo.y - 1 - j;
+                int jflip = 2*dom_lo.y - 1 - j;
                 if ( (bc_ptr_w[0].lo(1) == ERFBCType::ext_dir) ||
-                     (bc_ptr_w[0].lo(1) == ERFBCType::ext_dir_upwind && yvel_arr(i,dom_lo.y,k) >= zero) )
+                     (bc_ptr_w[0].lo(1) == ERFBCType::ext_dir_upwind && yvel_arr(Clamp(i,yvel_lo.x,yvel_hi.x),dom_lo.y,Clamp(k,yvel_lo.z,yvel_hi.z)) >= zero) )
                 {
                     dest_arr(i,j,k) = (zvel_bc_ptr) ? zvel_bc_ptr[k] : l_bc_extdir_vals_d[0][1];
                     if (l_use_terrain_fitted_coords) {
-                        dest_arr(i,j,k) = WFromOmega(i,j,k,dest_arr(i,j,k),
+                        int wi = Clamp(i,wr.ilo,wr.ihi), wj = Clamp(j,wr.jlo,wr.jhi), wk = Clamp(k,wr.klo,wr.khi);
+                        dest_arr(i,j,k) = WFromOmega(wi,wj,wk,dest_arr(i,j,k),
                                                      xvel_arr,yvel_arr,
                                                      mf_u,mf_v,z_phys_nd,dxInv);
                     }
@@ -150,11 +204,12 @@ void ERFPhysBCFunct_w::impose_lateral_zvel_bcs (const Array4<Real      >& dest_a
             [=] AMREX_GPU_DEVICE (int i, int j, int k) {
                 int jflip =  2*dom_hi.y + 1 - j;
                 if ( (bc_ptr_w[0].hi(1) == ERFBCType::ext_dir) ||
-                     (bc_ptr_w[0].hi(1) == ERFBCType::ext_dir_upwind && yvel_arr(i,dom_hi.y+1,k) <= zero) )
+                     (bc_ptr_w[0].hi(1) == ERFBCType::ext_dir_upwind && yvel_arr(Clamp(i,yvel_lo.x,yvel_hi.x),dom_hi.y+1,Clamp(k,yvel_lo.z,yvel_hi.z)) <= zero) )
                 {
                     dest_arr(i,j,k) = (zvel_bc_ptr) ? zvel_bc_ptr[k] : l_bc_extdir_vals_d[0][4];
                     if (l_use_terrain_fitted_coords) {
-                        dest_arr(i,j,k) = WFromOmega(i,j,k,dest_arr(i,j,k),
+                        int wi = Clamp(i,wr.ilo,wr.ihi), wj = Clamp(j,wr.jlo,wr.jhi), wk = Clamp(k,wr.klo,wr.khi);
+                        dest_arr(i,j,k) = WFromOmega(wi,wj,wk,dest_arr(i,j,k),
                                                      xvel_arr,yvel_arr,
                                                      mf_u,mf_v,z_phys_nd,dxInv);
                     }
@@ -206,6 +261,7 @@ void ERFPhysBCFunct_w::impose_vertical_zvel_bcs (const Array4<Real>& dest_arr,
     BL_PROFILE_VAR("impose_vertical_zvel_bcs()",impose_vertical_zvel_bcs);
     const auto& dom_lo = lbound(domain);
     const auto& dom_hi = ubound(domain);
+    const WFromOmegaRange wr = wfromomega_range(xvel_arr, yvel_arr, mf_u, mf_v, z_phys_nd);
 
     // xlo: ori = 0
     // ylo: ori = 1
@@ -264,7 +320,8 @@ void ERFPhysBCFunct_w::impose_vertical_zvel_bcs (const Array4<Real>& dest_arr,
         }
         if (bx.smallEnd(2) == dom_lo.z) {
             ParallelFor(makeSlab(bx,2,dom_lo.z), [=] AMREX_GPU_DEVICE (int i, int j, int k) {
-                dest_arr(i,j,k) = WFromOmega(i,j,k,l_bc_extdir_vals_d[0][2],
+                int wi = Clamp(i,wr.ilo,wr.ihi), wj = Clamp(j,wr.jlo,wr.jhi), wk = Clamp(k,wr.klo,wr.khi);
+                dest_arr(i,j,k) = WFromOmega(wi,wj,wk,l_bc_extdir_vals_d[0][2],
                                              xvel_arr,yvel_arr,
                                              mf_u,mf_v,z_phys_nd,dxInv);
             });
@@ -290,7 +347,8 @@ void ERFPhysBCFunct_w::impose_vertical_zvel_bcs (const Array4<Real>& dest_arr,
             ParallelFor(makeSlab(bx,2,dom_hi.z+1), [=] AMREX_GPU_DEVICE (int i, int j, int k)
             {
                 if (l_use_terrain_fitted_coords) {
-                    dest_arr(i,j,k) = WFromOmega(i,j,k,l_bc_extdir_vals_d[0][5],
+                    int wi = Clamp(i,wr.ilo,wr.ihi), wj = Clamp(j,wr.jlo,wr.jhi), wk = Clamp(k,wr.klo,wr.khi);
+                    dest_arr(i,j,k) = WFromOmega(wi,wj,wk,l_bc_extdir_vals_d[0][5],
                                                  xvel_arr,yvel_arr,
                                                  mf_u,mf_v,z_phys_nd,dxInv);
                 } else {

@@ -24,6 +24,22 @@ void ERFPhysBCFunct_v::impose_lateral_yvel_bcs (const Array4<Real>& dest_arr,
     const auto& dom_lo = lbound(domain);
     const auto& dom_hi = ubound(domain);
 
+    //
+    // An ext_dir_upwind face decides inflow against the face velocity, but the box we
+    // loop over does not always have a face velocity at every one of its cells: the
+    // state carries one more lateral ghost than the velocities do (ngrow_state =
+    // ComputeGhostCells()+1 against ngrow_vels = ComputeGhostCells()), and a velocity
+    // box is nodal in its own direction where the array being read is cell centered.
+    // Either way the outermost ghost cells have no velocity of their own, so sample
+    // the nearest one that exists. Cells already inside the velocity array are
+    // unaffected; only that outermost layer changes, and it previously read out of
+    // bounds.
+    //
+    const auto& xvel_lo = lbound(xvel_arr);
+    const auto& xvel_hi = ubound(xvel_arr);
+    const auto& yvel_lo = lbound(yvel_arr);
+    const auto& yvel_hi = ubound(yvel_arr);
+
     // Based on BCRec for the domain, we need to make BCRec for this Box
     // bccomp is used as starting index for m_domain_bcs_type
     //      0 is used as starting index for bcrs
@@ -60,10 +76,10 @@ void ERFPhysBCFunct_v::impose_lateral_yvel_bcs (const Array4<Real>& dest_arr,
         Box bx_xhi(bx);  bx_xhi.setSmall(0,dom_hi.x+1);
         ParallelFor(bx_xlo, bx_xhi,
             [=] AMREX_GPU_DEVICE (int i, int j, int k) {
-                int iflip = dom_lo.x - 1- i;
+                int iflip = 2*dom_lo.x - 1 - i;
                 if (bc_ptr[0].lo(0) == ERFBCType::ext_dir) {
                     dest_arr(i,j,k) = (yvel_bc_ptr) ? yvel_bc_ptr[k] : l_bc_extdir_vals_d[0][0];
-                } else if (bc_ptr[0].lo(0) == ERFBCType::ext_dir_upwind && xvel_arr(dom_lo.x,j,k) >= zero) {
+                } else if (bc_ptr[0].lo(0) == ERFBCType::ext_dir_upwind && xvel_arr(dom_lo.x,Clamp(j,xvel_lo.y,xvel_hi.y),Clamp(k,xvel_lo.z,xvel_hi.z)) >= zero) {
                     dest_arr(i,j,k) = (yvel_bc_ptr) ? yvel_bc_ptr[k] : l_bc_extdir_vals_d[0][0];
                 } else if (bc_ptr[0].lo(0) == ERFBCType::foextrap) {
                     dest_arr(i,j,k) =  dest_arr(dom_lo.x,j,k);
@@ -82,7 +98,7 @@ void ERFPhysBCFunct_v::impose_lateral_yvel_bcs (const Array4<Real>& dest_arr,
                 int iflip =  2*dom_hi.x + 1 - i;
                 if (bc_ptr[0].hi(0) == ERFBCType::ext_dir) {
                     dest_arr(i,j,k) = (yvel_bc_ptr) ? yvel_bc_ptr[k] : l_bc_extdir_vals_d[0][3];
-                } else if (bc_ptr[0].hi(0) == ERFBCType::ext_dir_upwind && xvel_arr(dom_hi.x+1,j,k) <= zero) {
+                } else if (bc_ptr[0].hi(0) == ERFBCType::ext_dir_upwind && xvel_arr(dom_hi.x+1,Clamp(j,xvel_lo.y,xvel_hi.y),Clamp(k,xvel_lo.z,xvel_hi.z)) <= zero) {
                     dest_arr(i,j,k) = (yvel_bc_ptr) ? yvel_bc_ptr[k] : l_bc_extdir_vals_d[0][3];
                 } else if (bc_ptr[0].hi(0) == ERFBCType::foextrap) {
                     dest_arr(i,j,k) =  dest_arr(dom_hi.x,j,k);
@@ -111,10 +127,10 @@ void ERFPhysBCFunct_v::impose_lateral_yvel_bcs (const Array4<Real>& dest_arr,
         ParallelFor(bx_ylo, bx_ylo_face,
             [=] AMREX_GPU_DEVICE (int i, int j, int k)
             {
-                int jflip = dom_lo.y-j;
+                int jflip = 2*dom_lo.y - j;
                 if (bc_ptr[0].lo(1) == ERFBCType::ext_dir) {
                     dest_arr(i,j,k) = (yvel_bc_ptr) ? yvel_bc_ptr[k] : l_bc_extdir_vals_d[0][1];
-                } else if (bc_ptr[0].lo(1) == ERFBCType::ext_dir_upwind && yvel_arr(i,dom_lo.y,k) >= zero) {
+                } else if (bc_ptr[0].lo(1) == ERFBCType::ext_dir_upwind && yvel_arr(Clamp(i,yvel_lo.x,yvel_hi.x),dom_lo.y,Clamp(k,yvel_lo.z,yvel_hi.z)) >= zero) {
                     dest_arr(i,j,k) = (yvel_bc_ptr) ? yvel_bc_ptr[k] : l_bc_extdir_vals_d[0][1];
                 } else if (bc_ptr[0].lo(1) == ERFBCType::foextrap) {
                     dest_arr(i,j,k) =  dest_arr(i,dom_lo.y,k);
@@ -136,7 +152,7 @@ void ERFPhysBCFunct_v::impose_lateral_yvel_bcs (const Array4<Real>& dest_arr,
             {
                 if (bc_ptr[0].lo(1) == ERFBCType::ext_dir) {
                     dest_arr(i,j,k) = (yvel_bc_ptr) ? yvel_bc_ptr[k] : l_bc_extdir_vals_d[0][1];
-                } else if (bc_ptr[0].lo(1) == ERFBCType::ext_dir_upwind && yvel_arr(i,dom_lo.y,k) >= zero) {
+                } else if (bc_ptr[0].lo(1) == ERFBCType::ext_dir_upwind && yvel_arr(Clamp(i,yvel_lo.x,yvel_hi.x),dom_lo.y,Clamp(k,yvel_lo.z,yvel_hi.z)) >= zero) {
                     dest_arr(i,j,k) = (yvel_bc_ptr) ? yvel_bc_ptr[k] : l_bc_extdir_vals_d[0][1];
                 } else if (bc_ptr[0].lo(1) == ERFBCType::neumann_int) {
                     dest_arr(i,j,k) = (Real(4.0)*dest_arr(i,dom_lo.y+1,k) - dest_arr(i,dom_lo.y+2,k))/three;
@@ -149,7 +165,7 @@ void ERFPhysBCFunct_v::impose_lateral_yvel_bcs (const Array4<Real>& dest_arr,
                 int jflip =  2*(dom_hi.y + 1) - j;
                 if (bc_ptr[0].hi(1) == ERFBCType::ext_dir) {
                     dest_arr(i,j,k) = (yvel_bc_ptr) ? yvel_bc_ptr[k] : l_bc_extdir_vals_d[0][4];
-                } else if (bc_ptr[0].hi(1) == ERFBCType::ext_dir_upwind && yvel_arr(i,dom_hi.y+1,k) <= zero) {
+                } else if (bc_ptr[0].hi(1) == ERFBCType::ext_dir_upwind && yvel_arr(Clamp(i,yvel_lo.x,yvel_hi.x),dom_hi.y+1,Clamp(k,yvel_lo.z,yvel_hi.z)) <= zero) {
                     dest_arr(i,j,k) = (yvel_bc_ptr) ? yvel_bc_ptr[k] : l_bc_extdir_vals_d[0][4];
                 } else if (bc_ptr[0].hi(1) == ERFBCType::foextrap) {
                     dest_arr(i,j,k) =  dest_arr(i,dom_hi.y+1,k);
@@ -171,7 +187,7 @@ void ERFPhysBCFunct_v::impose_lateral_yvel_bcs (const Array4<Real>& dest_arr,
             {
                 if (bc_ptr[0].hi(1) == ERFBCType::ext_dir) {
                     dest_arr(i,j,k) = (yvel_bc_ptr) ? yvel_bc_ptr[k] : l_bc_extdir_vals_d[0][4];
-                } else if (bc_ptr[0].hi(1) == ERFBCType::ext_dir_upwind && yvel_arr(i,dom_hi.y+1,k) <= zero) {
+                } else if (bc_ptr[0].hi(1) == ERFBCType::ext_dir_upwind && yvel_arr(Clamp(i,yvel_lo.x,yvel_hi.x),dom_hi.y+1,Clamp(k,yvel_lo.z,yvel_hi.z)) <= zero) {
                     dest_arr(i,j,k) = (yvel_bc_ptr) ? yvel_bc_ptr[k] : l_bc_extdir_vals_d[0][4];
                 } else if (bc_ptr[0].hi(1) == ERFBCType::neumann_int) {
                     dest_arr(i,j,k) = (Real(4.0)*dest_arr(i,dom_hi.y,k) - dest_arr(i,dom_hi.y-1,k))/three;
@@ -242,7 +258,7 @@ void ERFPhysBCFunct_v::impose_vertical_yvel_bcs (const Array4<Real>& dest_arr,
         Box bx_zhi(bx);  bx_zhi.setSmall(2,dom_hi.z+1);
         ParallelFor(bx_zlo, bx_zhi,
             [=] AMREX_GPU_DEVICE (int i, int j, int k) {
-                int kflip = dom_lo.z - 1 - k;
+                int kflip = 2*dom_lo.z - 1 - k;
                 if (bc_ptr[0].lo(2) == ERFBCType::ext_dir) {
                     dest_arr(i,j,k) = l_bc_extdir_vals_d[0][2];
                 } else if (bc_ptr[0].lo(2) == ERFBCType::foextrap) {

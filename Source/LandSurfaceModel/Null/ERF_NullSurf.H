@@ -33,20 +33,20 @@ class NullSurf {
                const amrex::Real& /*dt_advance*/,
                amrex::Vector<amrex::Vector<std::string>>& /*nc_init_file*/) { }
 
-    virtual void Init (const int&, const amrex::MultiFab&, const amrex::MultiFab&,
-                       const amrex::MultiFab&, const amrex::Geometry&, const amrex::Real&,
-                       std::unique_ptr<amrex::MultiFab>&) { }
-
-    virtual void Init (const int& lev, const amrex::MultiFab& cons_in,
-                       const amrex::MultiFab& /*u_in*/, const amrex::MultiFab& /*v_in*/,
-                       const amrex::Geometry& geom, const amrex::Geometry& geom0,
+    virtual void Init (const int& lev,
+                       const amrex::MultiFab& cons_in,
+                       const amrex::MultiFab& /*u_in*/,
+                       const amrex::MultiFab& /*v_in*/,
+                       const amrex::Geometry& geom,
+                       const amrex::Geometry& geom0,
                        amrex::Vector<amrex::BCRec>& domain_bcs_type,
                        amrex::IntVect& refRatio, const amrex::Real& dt_advance,
                        std::unique_ptr<amrex::MultiFab>& /*z_phys_nd*/,
                        amrex::Vector<amrex::Vector<std::string>>& nc_init_file)
     {
-        Init(lev, cons_in, geom, geom0, domain_bcs_type, refRatio,
-             dt_advance, nc_init_file);
+        Init(lev, cons_in, geom, geom0,
+             domain_bcs_type, refRatio, dt_advance,
+             nc_init_file);
     }
 
     virtual
@@ -67,7 +67,8 @@ class NullSurf {
                         const amrex::Real& /*elapsed_time*/,
                         const amrex::Real& /*dt_advance*/,
                         const int& /*nstep*/,
-                        const bool /*updated_lev0*/) { }
+                        const bool /*updated_lev0*/,
+                        amrex::MultiFab* /*z_nd*/) { }
 
     virtual
     void
@@ -136,7 +137,7 @@ class NullSurf {
 
     virtual
     std::unordered_map<std::string, std::string>&
-    Lsm_WRFInputNames() { return wrfinput_map; }
+    Lsm_WRFInputNames () { return wrfinput_map; }
 
     virtual
     void
@@ -192,6 +193,20 @@ class NullSurf {
     {}
 
     /**
+     * Returns whether the reference-level atmospheric fields have been filled.
+     */
+    virtual
+    bool
+    Lsm_Has_Atmos_State () { return true; }
+
+    /**
+     * Registers whether the source level's atmospheric fields have been filled.
+     */
+    virtual
+    void
+    Lsm_Set_Source_Has_Atmos_State (bool /*has_atmos_state*/) {}
+
+    /**
      * Returns the atmospheric geometry used by coupling fields.
      */
     virtual
@@ -234,6 +249,12 @@ class NullSurf {
     virtual
     bool
     Get_Update_Status () { return false; }
+
+    // Whether this level integrates a land model of its own from its own setup data, so
+    // that rebuilding the level would restart that state (Noah-MP; see NOAHMP::Init).
+    [[nodiscard]] virtual
+    bool
+    Runs_Own_Land_Driver () const { return false; }
 
     // Scalar LSM step counter (NoahMP itimestep). Persisted in checkpoint so
     // the LSM substepping schedule survives restart. 0 means "uninitialized".

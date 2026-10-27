@@ -4,7 +4,7 @@ erf.prob_name = "ABL"
 stop_time = 3600.0
 
 # PROBLEM SIZE & GEOMETRY
-geometry.prob_extent =  40   40  1000
+geometry.prob_extent =  40   40  1009.2145750784537
 #amr.n_cell           =   4    4   100
 
 geometry.is_periodic = 1 1 0
@@ -28,10 +28,8 @@ erf.grid_stretching_ratio = 1.025
 # MOST BOUNDARY (DEFAULT IS ADIABATIC FOR THETA)
 #zlo.type        = "SlipWall"
 zlo.type        = "surface_layer"
-erf.surface_layer.flux_type = "custom"
-erf.most.ustar  = 0.5
-erf.most.tstar  = 0.15  # actually ustar*tstar
-erf.most.qstar  = 0.0   # actually ustar*qstar
+erf.surface_layer.flux_type = "moeng"
+erf.most.surf_temp_flux = 0.15  # [K m/s]
 
 zhi.type        = "SlipWall"
 zhi.theta_grad  = 0.003  # [K/m] to match the input sounding

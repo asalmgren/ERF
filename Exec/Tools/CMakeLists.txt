@@ -15,8 +15,15 @@ if(ERF_ENABLE_NETCDF)
         # (and the structs the latter pulls in)
         ${PROJECT_SOURCE_DIR}/Source
         ${PROJECT_SOURCE_DIR}/Source/DataStructs
+        # ERF_DataStruct.H pulls in ERF_RadStruct.H, which includes
+        # ERF_NoahMPSoilTable.H and, through ERF_SimplifiedSEB.H,
+        # ERF_MicrophysicsConstants.H
+        ${PROJECT_SOURCE_DIR}/Source/Radiation/TwoStream
+        ${PROJECT_SOURCE_DIR}/Source/Microphysics
         ${PROJECT_SOURCE_DIR}/Source/PBL
         ${PROJECT_SOURCE_DIR}/Source/Utils
+        # ERF_TurbStruct.H checks erf.Rt_min against the bounds in ERF_RANSClosure.H
+        ${PROJECT_SOURCE_DIR}/Source/Diffusion
         ${AMREX_SUBMOD_LOCATION}/Src/Base
         ${AMREX_SUBMOD_LOCATION}/Src/EB
         ${AMREX_SUBMOD_LOCATION}/Src/Extern/HDF5

@@ -2,29 +2,43 @@ name: ERF CI (hip)
 
 on:
   push:
-    # branches: [development]
-    paths-ignore:
-      - Docs
-      - README.rst
-      - license.txt
+    branches: [development]
+    paths:
+      - '**'
+      - '!Docs/**'
+      - '!**.md'
+      - '!**.rst'
+      - '!license.txt'
+      - '!.github/workflows/**'
+      - '.github/workflows/hip.yml'
+      - '.github/actions/**'
 
   pull_request:
     branches: [development]
-    types: [opened, synchronize, reopened, closed]
+    types: [opened, synchronize, reopened]
+    paths:
+      - '**'
+      - '!Docs/**'
+      - '!**.md'
+      - '!**.rst'
+      - '!license.txt'
+      - '!.github/workflows/**'
+      - '.github/workflows/hip.yml'
+      - '.github/actions/**'
+  workflow_dispatch:
 
 concurrency:
-  group: ${{ github.event.pull_request.number || github.ref }}-${{ github.head_ref }}-hip
-  cancel-in-progress: true
+  group: ${{ github.event.pull_request.number || github.ref }}-${{ github.head_ref || github.sha }}-hip
+  cancel-in-progress: ${{ github.ref != 'refs/heads/development' }}
 
 jobs:
   # MPI_C is broken since HIP 4.1
   # https://gitlab.kitware.com/cmake/cmake/-/issues/21968
   # https://github.com/ROCm-Developer-Tools/HIP/issues/2246
   Build-And-Test-HIP:
-    # The closed event exists only to cancel in-progress runs via concurrency.
-    if: github.event.action != 'closed'
     name: HIP ROCm GFortran@9.3 C++17 - Mesh ${{matrix.mesh_precision}} Particles ${{matrix.particles}} ${{matrix.particles_precision}}
     runs-on: ubuntu-22.04
+    timeout-minutes: 180
     # Have to have -Wno-deprecated-declarations due to deprecated atomicAddNoRet
     # Have to have -Wno-gnu-zero-variadic-macro-arguments to avoid
     #    amrex/Src/Base/AMReX_GpuLaunchGlobal.H:15:5: error: must specify at least one argument for '...' parameter of variadic macro [-Werror,-Wgnu-zero-variadic-macro-arguments]
@@ -38,10 +52,16 @@ jobs:
     # NOTE: -Werror was removed because ERF specifically had a lot of warnings. It will be a separate task to go through and fix them all...
     env: {CXXFLAGS: "-Wall -Wextra -Wpedantic -Wnull-dereference -Wfloat-conversion -Wshadow -Woverloaded-virtual -Wextra-semi -Wunreachable-code -Wno-deprecated-declarations -Wno-gnu-zero-variadic-macro-arguments -Wno-pass-failed"}
     strategy:
+      fail-fast: false
       matrix:
-        particles: [OFF, ON]
+        # GPU builds cover the particle-enabled configuration only. The
+        # particles-OFF variant costs a second long GPU compile for solver
+        # coverage the particles-ON build already provides; it is still built
+        # on CPU by ci, gcc and windows-mpi.
+        particles: [ON]
         particles_precision: [DOUBLE, SINGLE]
-        mesh_precision: [DOUBLE, SINGLE]
+        # PR tier: DOUBLE only. SINGLE builds on merge to development (which also writes its ccache).
+        mesh_precision: ${{ fromJSON(github.event_name == 'pull_request' && '["DOUBLE"]' || '["DOUBLE", "SINGLE"]') }}
         exclude:
           # Only matching mesh/particle precisions are tested, i.e. DOUBLE mesh
           # with DOUBLE particles and SINGLE mesh with SINGLE particles.
@@ -49,9 +69,6 @@ jobs:
             particles_precision: SINGLE
           - mesh_precision: SINGLE
             particles_precision: DOUBLE
-          # SINGLE precision is only exercised in the particle-enabled build.
-          - mesh_precision: SINGLE
-            particles: OFF
 
     steps:
 
@@ -68,20 +85,22 @@ jobs:
     - name: Install CCache
       run: Submodules/AMReX/.github/workflows/dependencies/dependencies_ccache.sh
 
-    - name: Set Up Cache
-      uses: actions/cache@v6
+    # ccache per matrix variant, written only from development; see ci.yml for how it works.
+    - name: Restore Cache
+      uses: actions/cache/restore@v6
       with:
         path: ~/.cache/ccache
-        key: ccache-${{ github.workflow }}-${{ github.job }}-git-${{ github.sha }}
+        key: ccache-${{ github.workflow }}-${{ github.job }}-${{ matrix.mesh_precision }}-git-${{ github.sha }}
         restore-keys: |
-             ccache-${{ github.workflow }}-${{ github.job }}-git-
+             ccache-${{ github.workflow }}-${{ github.job }}-${{ matrix.mesh_precision }}-git-
 
     - name: Build & Install
       run: |
         export CCACHE_COMPRESS=1
         export CCACHE_COMPRESSLEVEL=10
-        export CCACHE_MAXSIZE=300M
+        export CCACHE_MAXSIZE=450M
         ccache -z
+        build_start=$(date +%s)
 
         source /etc/profile.d/rocm.sh
         hipcc --version
@@ -106,9 +125,9 @@ jobs:
           -DERF_ENABLE_ALL_WARNINGS:BOOL=ON \
           -DERF_ENABLE_FCOMPARE:BOOL=ON \
           -DCODECOV:BOOL=ON \
-          -DCMAKE_C_COMPILER=$(which clang)             \
-          -DCMAKE_CXX_COMPILER=$(which clang++)         \
-          -DCMAKE_Fortran_COMPILER=$(which flang)       \
+          -DCMAKE_C_COMPILER="$(which clang)"             \
+          -DCMAKE_CXX_COMPILER="$(which clang++)"         \
+          -DCMAKE_Fortran_COMPILER="$(which flang)"       \
           -DCMAKE_CXX_STANDARD=17 \
           ${{github.workspace}};
         # ${{matrix.mpipreflags}} \
@@ -118,19 +137,36 @@ jobs:
         # cmake --build ${{runner.workspace}}/ERF/build-${{matrix.os}} --parallel ${{env.NPROCS}};
 
         pushd ${{runner.workspace}}/ERF/build-${{matrix.os}};
-        # make -j ${{env.NPROCS}};
+        # Compile the two big object libraries on every core, then finish (test
+        # objects and all the links) at -j 2. HIP device links are memory-hungry:
+        # with -j 4 two links ran side by side and the runner VM was shut down
+        # (out of memory) 13 minutes into linking erf_parallel_tests.
+        make -j "$(nproc)" amrex_3d erf_srclib 2>&1 | tee -a ${{runner.workspace}}/build-${{matrix.os}}-output.txt;
         make -j 2 2>&1 | tee -a ${{runner.workspace}}/build-${{matrix.os}}-output.txt;
 
-        ccache -s
+        echo '```' >> "$GITHUB_STEP_SUMMARY"
+        # Keep only what this build used: ccache touches an object on every hit, so
+        # anything older than the build is stale. Without this the cache fills with
+        # objects from superseded commits, hits its cap, and evicts live objects.
+        ccache --evict-older-than "$(( $(date +%s) - build_start + 120 ))s"
+        ccache -s | tee -a "$GITHUB_STEP_SUMMARY"
+        echo '```' >> "$GITHUB_STEP_SUMMARY"
         du -hs ~/.cache/ccache
+
+    - name: Save Cache
+      if: always() && github.ref_name == github.event.repository.default_branch
+      uses: actions/cache/save@v6
+      with:
+        path: ~/.cache/ccache
+        key: ccache-${{ github.workflow }}-${{ github.job }}-${{ matrix.mesh_precision }}-git-${{ github.sha }}
 
     - name: Report
       run: |
         grep -Ei "warning:|error:" ${{runner.workspace}}/build-${{matrix.os}}-output.txt \
-          | grep -Ev "Submodules/(amrex|googletest)" | grep -Ev "lto-wrapper: warning:" | sort | uniq \
+          | grep -Ev "Submodules/(amrex|AMReX|googletest)" | grep -Ev "lto-wrapper: warning:" | sort | uniq \
           | awk 'BEGIN{i=0}{print $0}{i++}END{print "Warnings: "i}' > ${{runner.workspace}}/build-${{matrix.os}}-output-warnings.txt
         cat ${{runner.workspace}}/build-${{matrix.os}}-output-warnings.txt
-        export return=$(tail -n 1 ${{runner.workspace}}/build-${{matrix.os}}-output-warnings.txt | awk '{print $2}')
+        return=$(tail -n 1 ${{runner.workspace}}/build-${{matrix.os}}-output-warnings.txt | awk '{print $2}')
         exit ${return}
 
     # - name: Regression Tests

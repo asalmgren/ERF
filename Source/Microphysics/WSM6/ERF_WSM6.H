@@ -13,6 +13,7 @@
 #include "ERF_MicrophysicsConstants.H"
 #include "ERF_DataStruct.H"
 #include "ERF_IndexDefines.H"
+#include "ERF_MicrophysicsColumns.H"
 #include "ERF_MicrophysicsUtils.H"
 #include "ERF_NullMoist.H"
 #include "ERF_SurfacePrecipitation.H"
@@ -118,14 +119,19 @@ void wsm6_copy_micro_to_state_cell (
     states(i,j,k,RhoQ6_comp) = rho(i,j,k) * amrex::max(amrex::Real(0), qg(i,j,k));
 }
 
+// Components of WSM6's sedimentation face fluxes (m_sed), with the state they carry
+namespace WSM6Sed {
+    enum { qi = 0 /* rhoQ3 */, qr /* rhoQ4 */, qs /* rhoQ5 */, qg /* rhoQ6 */, NumComps };
+}
+
 class WSM6 : public NullMoist {
     using FabPtr = std::shared_ptr<amrex::MultiFab>;
 
 public:
-    WSM6() {}
-    virtual ~WSM6() = default;
+    WSM6 () {}
+    virtual ~WSM6 () = default;
 
-    void Define(SolverChoice& sc) override
+    void Define (SolverChoice& sc) override
     {
         m_moisture_type = sc.moisture_type;
         m_rdOcp = sc.rdOcp;
@@ -159,50 +165,52 @@ public:
     static constexpr amrex::Real n0s        = amrex::Real(2.0e6);
     static constexpr amrex::Real alpha_wsm6 = amrex::Real(0.12);
 
-    void Init(const amrex::MultiFab& cons_in,
-              const amrex::BoxArray& grids,
-              const amrex::Geometry& geom,
-              const amrex::Real& dt_advance,
-              std::unique_ptr<amrex::MultiFab>& z_phys_nd,
-              std::unique_ptr<amrex::MultiFab>& detJ_cc) override;
+    void Init (const amrex::MultiFab& cons_in,
+               const amrex::BoxArray& grids,
+               const amrex::Geometry& geom,
+               const amrex::Real& dt_advance,
+               std::unique_ptr<amrex::MultiFab>& z_phys_nd,
+               std::unique_ptr<amrex::MultiFab>& detJ_cc) override;
 
-    void Set_dzmin(const amrex::Real dz_min) override { m_dzmin = dz_min; }
+    void Set_dzmin (const amrex::Real dz_min) override { m_dzmin = dz_min; }
 
-    void Copy_State_to_Micro(const amrex::MultiFab& cons_in) override;
-    void Copy_State_to_Micro(const amrex::MultiFab& cons_in,
-                             const amrex::MultiFab* base_state);
-    void Copy_Micro_to_State(amrex::MultiFab& cons_in) override;
+    void Copy_State_to_Micro (const amrex::MultiFab& cons_in) override;
+    void Copy_State_to_Micro (const amrex::MultiFab& cons_in,
+                              const amrex::MultiFab* base_state);
+    void Copy_Micro_to_State (amrex::MultiFab& cons_in) override;
 
-    void Update_Micro_Vars(amrex::MultiFab& cons_in,
-                           const amrex::MultiFab* base_state) override;
+    void Update_Micro_Vars (amrex::MultiFab& cons_in,
+                            const amrex::MultiFab* base_state) override;
 
-    void Update_Micro_Vars(amrex::MultiFab& cons_in) override
+    void Update_Micro_Vars (amrex::MultiFab& cons_in) override
     {
         Copy_State_to_Micro(cons_in);
     }
 
-    void Update_State_Vars(amrex::MultiFab& cons_in,
-                           const amrex::MultiFab& /*z_phys_nd*/) override
+    void Update_State_Vars (amrex::MultiFab& cons_in,
+                            const amrex::MultiFab& /*z_phys_nd*/) override
     {
         Copy_Micro_to_State(cons_in);
     }
 
-    void Advance(const amrex::Real& dt_advance,
-                 const SolverChoice& solverChoice) override;
+    void Advance (const amrex::Real& dt_advance,
+                  const SolverChoice& solverChoice) override;
 
-    amrex::MultiFab* Qmoist_Ptr(const int& varIdx) override
+    const SedimentationFlux* Sed_Flux () const override { return &m_sed; }
+
+    amrex::MultiFab* Qmoist_Ptr (const int& varIdx) override
     {
         AMREX_ALWAYS_ASSERT(varIdx < m_qmoist_size);
         return mic_fab_vars[MicVarMap[varIdx]].get();
     }
 
-    int Qmoist_Size() override { return m_qmoist_size; }
-    int Qstate_Moist_Size() override { return n_qstate_moist_size; }
+    int Qmoist_Size () override { return m_qmoist_size; }
+    int Qstate_Moist_Size () override { return n_qstate_moist_size; }
     int Qstate_Moist_NumConc_Size () override { return n_qstate_moist_numconc_size; }
 
-    void Qmoist_Restart_Vars(const SolverChoice&,
-                             std::vector<int>& a_idx,
-                             std::vector<std::string>& a_names) const override
+    void Qmoist_Restart_Vars (const SolverChoice&,
+                              std::vector<int>& a_idx,
+                              std::vector<std::string>& a_names) const override
     {
         a_idx = {0, 1, 2};
         a_names = {"RainAccum", "SnowAccum", "GraupAccum"};
@@ -217,6 +225,11 @@ public:
         sources.graupel = {mic_fab_vars[MicVar_WSM6::graup_accum].get(), rhoh2o / amrex::Real(1000.0)};
         return sources;
     }
+
+    // The body of Advance, run on grids in which no column is split between boxes.
+    // Public because nvcc rejects extended __device__ lambdas in private or protected members.
+    void AdvanceColumns (const amrex::Real& dt_advance,
+                         const SolverChoice& sc);
 
 private:
     int m_qmoist_size = 3;
@@ -239,12 +252,18 @@ private:
 
     amrex::Array<FabPtr, MicVar_WSM6::NumVars> mic_fab_vars;
 
+    // Full-column layout of this level's grids (see ERF_MicrophysicsColumns.H)
+    MicrophysicsColumns m_columns;
+
+    // Sedimentation face fluxes of the most recent Advance, in the order of WSM6Sed
+    SedimentationFlux m_sed;
+
     // ---- WSM6 init coefficients (from mp_wsm6_init save variables) ----
     // hail_opt-dependent (set in Initialize() based on m_hail_opt)
     bool m_hail_opt{false};
     amrex::Real m_n0g{0}, m_deng{0}, m_avtg{0}, m_bvtg{0}, m_lamdagmax{0};
 
-    void initialize_coeffs();
+    void initialize_coeffs ();
 
     // Derived coefficients (computed in initialize_coeffs(), called from Init())
     amrex::Real m_pi_wsm6{0}, m_xlv1{0};

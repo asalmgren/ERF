@@ -4,7 +4,7 @@
 
 namespace erf_auxiliary {
 
-ProjectionValidation AuxiliaryProjection::validate(const int source_components) const
+ProjectionValidation AuxiliaryProjection::validate (const int source_components) const
 {
     if (source_components < 0) return {false, "negative auxiliary component count"};
     std::set<std::string> targets;
@@ -18,8 +18,11 @@ ProjectionValidation AuxiliaryProjection::validate(const int source_components) 
             return {false, "only auxiliary mass components may enter this coupling projection"};
         }
         if (!targets.insert(rule.target).second) return {false, "duplicate projection target"};
+        // Compare against the room left after source_begin rather than forming
+        //    source_begin + source_count, which could overflow int
         if (rule.source_begin < 0 || rule.source_count <= 0 ||
-            rule.source_begin + rule.source_count > source_components) {
+            rule.source_begin > source_components ||
+            rule.source_count > source_components - rule.source_begin) {
             return {false, "projection source range is outside the auxiliary state"};
         }
         for (int c = rule.source_begin; c < rule.source_begin + rule.source_count; ++c) {

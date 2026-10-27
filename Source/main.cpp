@@ -1,4 +1,9 @@
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <iostream>
+#include <limits>
 
 #include <AMReX.H>
 #include <AMReX_BLProfiler.H>
@@ -128,8 +133,12 @@ void add_par () {
       AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
          derived_prob_hi.size() == erf_prob_hi.size(),
          "erf.prob_hi and erf.prob_extent have inconsistent lengths.");
+      // Allow for rounding in prob_lo + prob_extent, relative to the inputs' magnitude
       for (int i = 0; i < static_cast<int>(erf_prob_hi.size()); ++i) {
-         if (derived_prob_hi[i] != erf_prob_hi[i]) {
+         const amrex::Real lo = (i < static_cast<int>(erf_prob_lo.size()) ? erf_prob_lo[i] : 0.0);
+         const amrex::Real scale = std::max({std::abs(lo), std::abs(erf_prob_extent[i]), std::abs(erf_prob_hi[i])});
+         const amrex::Real tol = amrex::Real(100.0) * std::numeric_limits<amrex::Real>::epsilon() * scale;
+         if (std::abs(derived_prob_hi[i] - erf_prob_hi[i]) > tol) {
             amrex::Abort("erf.prob_hi and erf.prob_extent are both specified but inconsistent.");
          }
       }
@@ -152,21 +161,88 @@ void add_par () {
    }
 }
 
+#ifdef ERF_HAS_FORTRAN
+// Source/Utils/ERF_FlushFortranUnits.F90
+extern "C" void erf_flush_fortran_units ();
+#else
+static void erf_flush_fortran_units () {}
+#endif
+
+/**
+ * Make a run that leaves through exit() before amrex::Finalize report failure.
+ *
+ * A normal run calls amrex::Finalize before main returns, so a process that reaches
+ * exit() while AMReX is still initialised has stopped part-way -- with no final
+ * plotfile or checkpoint -- whatever status it asked for. The ways in are a Fortran STOP
+ * in a coupled library (Noah-MP has 27, all exit status 0) and the exit() calls left in
+ * ERF itself, some of which also pass 0. Run under Open MPI's launcher such a run is
+ * still flagged, because the rank never calls MPI_Finalize; run directly, or under a
+ * launcher that does not enforce that, it reports success. Every return from main after
+ * amrex::Initialize goes through amrex::Finalize, so this never fires on a normal exit.
+ *
+ * amrex::Abort ends in MPI_Abort, or std::_Exit in a serial build. Open MPI's MPI_Abort
+ * kills the job without exit(), but MPICH's (and Cray MPICH's) ends in exit(errorcode),
+ * so there the trap runs after an abort as well: the run is still reported as a failure,
+ * with status 1 in place of the abort's code, and the message below allows for it.
+ *
+ * A Fortran STOP or an exit() fires on the one rank that hit the problem; ending only
+ * that rank would leave the others blocked in their next collective until the launcher
+ * notices (Open MPI does; srun without --kill-on-bad-exit and some PMI setups may not).
+ * So the trap calls MPI_Abort to tear the whole job down, guarded so that an MPI whose
+ * own MPI_Abort ends in exit() (MPICH, Cray MPICH) cannot re-enter it, and skipped when
+ * MPI is not initialised or already finalised.
+ *
+ * std::_Exit is the only way to change the status from here, and it skips the rest of the
+ * exit sequence, which is what would flush the output buffers. Standard output is fully
+ * buffered when it is redirected to a file, so flush everything first -- C++ streams, C
+ * stdio and the Fortran units -- or the lines that explain the stop are lost.
+ */
+void install_exit_trap ()
+{
+    std::atexit([]() {
+        if (amrex::Initialized()) {
+            std::cout.flush();
+            std::clog.flush();
+            std::cerr.flush();
+            erf_flush_fortran_units();
+            std::fflush(nullptr);
+            std::fputs("ERF: exit() was called while AMReX was still initialised, so the run "
+                       "stopped before finishing; the reason should be printed above (a "
+                       "Fortran STOP in a coupled library such as Noah-MP, an error exit in "
+                       "ERF, or an amrex::Abort under an MPI whose MPI_Abort calls exit()). "
+                       "Reporting failure whatever exit status was requested.\n",
+                       stderr);
+            std::fflush(stderr);
+#ifdef AMREX_USE_MPI
+            // atexit handlers run single-threaded, so a plain flag is enough of a
+            // reentrancy guard for the MPI_Abort-calls-exit() implementations.
+            static bool aborting = false;
+            int mpi_up = 0, mpi_done = 0;
+            MPI_Initialized(&mpi_up);
+            MPI_Finalized(&mpi_done);
+            if (mpi_up && !mpi_done && !aborting) {
+                aborting = true;
+                MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+            }
+#endif
+            std::_Exit(EXIT_FAILURE);
+        }
+    });
+}
+
 /**
  * Main driver -- creates the ERF object, calls ERF.InitData() and ERF.Evolve()
 */
 int main (int argc, char* argv[])
 {
 
+// For the early exits below, which all come before amrex::Initialize (and, with
+// WW3 coupling, before amrex::MPMD::Initialize): MPI is ours to finalize.
 auto finalize_mpi_and_return = [](int code) {
 #ifdef AMREX_USE_MPI
-#ifdef ERF_USE_WW3_COUPLING
-    amrex::MPMD::Finalize();
-#else
     MPI_Finalize();
 #endif
-#endif
-return code;
+    return code;
 };
 
 #if defined(AMREX_MPI_THREAD_MULTIPLE)
@@ -182,7 +258,7 @@ return code;
         ERF::print_usage(MPI_COMM_WORLD, std::cout);
         ERF::print_error(
             MPI_COMM_WORLD, "No input file provided. Exiting!!");
-        return 1;
+        return finalize_mpi_and_return(1);
     }
 
     // Look for "-h" or "--help" flag and print usage
@@ -191,7 +267,7 @@ return code;
         if ((param == "--help") || (param == "-h") || (param == "--usage")) {
             ERF::print_banner(MPI_COMM_WORLD, std::cout);
             ERF::print_usage(MPI_COMM_WORLD, std::cout);
-            return 0;
+            return finalize_mpi_and_return(0);
         }
     }
 
@@ -214,22 +290,14 @@ return code;
         return finalize_mpi_and_return(1);
     }
 
-  //  print_banner(MPI_COMM_WORLD, std::cout);
-    // Check to see if the command line contains --describe
-    if (argc >= 2) {
-        for (auto i = 1; i < argc; i++) {
-            if (std::string(argv[i]) == "--describe") {
-                ERF::writeBuildInfo(std::cout);
-                return 0;
-            }
-        }
-    }
 #ifdef ERF_USE_WW3_COUPLING
     MPI_Comm comm = amrex::MPMD::Initialize(argc, argv);
     amrex::Initialize(argc,argv,true,comm,add_par);
 #else
     amrex::Initialize(argc,argv,true,MPI_COMM_WORLD,add_par);
 #endif
+
+    install_exit_trap();
 
     // Only when argv[1] is actually an inputs file (same test the surrounding code uses).
     if (argc > 1 && std::string(argv[1]).find('=') == std::string::npos) {
@@ -289,9 +357,10 @@ return code;
     amrex::Finalize();
 #ifdef AMREX_USE_MPI
 #ifdef ERF_USE_WW3_COUPLING
+    // MPI was initialized above, before amrex::MPMD::Initialize, so MPMD::Finalize
+    // frees its communicator but leaves MPI_Finalize to us.
     amrex::MPMD::Finalize();
-#else
-    MPI_Finalize();
 #endif
+    MPI_Finalize();
 #endif
 }

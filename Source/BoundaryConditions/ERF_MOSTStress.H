@@ -7,6 +7,13 @@
 #include "ERF_Wstar.H"
 
 /**
+ * Minimum wind speed [m/s] of the surface-layer flux kernels below (their WSMIN), and of
+ * the resistance the two-stream skin moisture forms in
+ * SurfaceLayer::fill_qsurf_with_skin_moisture to invert the surface_temp kernel's flux.
+ */
+inline constexpr amrex::Real most_min_wind_speed = amrex::Real(0.1);
+
+/**
  * Adiabatic with constant roughness
  */
 struct adiabatic
@@ -59,7 +66,8 @@ struct adiabatic
                   const amrex::Array4<amrex::Real>& /*eta_arr*/) const
     {
         olen_arr(i,j,k)   = bogus_large_value;
-        u_star_arr(i,j,k) = mdata.kappa * umm_arr(i,j,k) / std::log(zref_arr(i,j,k) / z0_arr(i,j,k));
+        amrex::Real umm   = std::max(umm_arr(i,j,k), WSMIN);
+        u_star_arr(i,j,k) = mdata.kappa * umm / std::log(zref_arr(i,j,k) / z0_arr(i,j,k));
         t_star_arr(i,j,k) = zero;
         q_star_arr(i,j,k) = zero;
     }
@@ -67,6 +75,7 @@ struct adiabatic
 private:
     most_data mdata;
     similarity_funs sfuns;
+    const amrex::Real WSMIN = most_min_wind_speed; // minimum wind speed
 };
 
 
@@ -177,7 +186,7 @@ private:
 #else
     const amrex::Real tol_z = amrex::Real(1.0e-10);
 #endif
-    const amrex::Real WSMIN = amrex::Real(0.1); // minimum wind speed
+    const amrex::Real WSMIN = most_min_wind_speed; // minimum wind speed
 };
 
 
@@ -279,7 +288,7 @@ private:
 #else
     const amrex::Real tol_z = amrex::Real(1.0e-10);
 #endif
-    const amrex::Real WSMIN = amrex::Real(0.1); // minimum wind speed
+    const amrex::Real WSMIN = most_min_wind_speed; // minimum wind speed
 };
 
 
@@ -378,7 +387,7 @@ private:
 #else
     const amrex::Real tol_z = amrex::Real(1.0e-10);
 #endif
-    const amrex::Real WSMIN = amrex::Real(0.1); // minimum wind speed
+    const amrex::Real WSMIN = most_min_wind_speed; // minimum wind speed
 };
 
 
@@ -483,7 +492,7 @@ private:
 #else
     const amrex::Real eps = amrex::Real(1e-15);
 #endif
-    const amrex::Real WSMIN  = amrex::Real(0.1); // minimum wind speed
+    const amrex::Real WSMIN  = most_min_wind_speed; // minimum wind speed
 };
 
 
@@ -592,7 +601,7 @@ struct surface_flux
             }
             ++iter;
         } while ((std::abs(u_star_arr(i,j,k) - ustar) > tol) && iter <= max_iters);
-        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(iter < max_iters,
+        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(iter <= max_iters,
                                          "Maximum number of MOST iterations reached.");
 
         // Populate the stored MOST arrays
@@ -628,7 +637,7 @@ private:
     bool spec_qflux;
     similarity_funs sfuns;
     const amrex::Real tol = amrex::Real(1.0e-5);
-    const amrex::Real WSMIN = amrex::Real(0.1); // minimum wind speed
+    const amrex::Real WSMIN = most_min_wind_speed; // minimum wind speed
     const amrex::Real USTARMIN = amrex::Real(0.001); // minimum friction velocity
     const amrex::Real alpha = amrex::Real(0.5); // under-relaxation factor for umm/u* iteration
 };
@@ -744,7 +753,7 @@ struct surface_flux_charnock
             u_star_arr(i,j,k) = mdata.kappa * umm / (std::log(zref / z0) - psi_m);
             ++iter;
         } while ((std::abs(u_star_arr(i,j,k) - ustar) > tol) && iter <= max_iters);
-        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(iter < max_iters,
+        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(iter <= max_iters,
                                          "Maximum number of MOST iterations reached.");
 
         // Populate the stored MOST arrays
@@ -768,7 +777,7 @@ private:
     bool spec_qflux;
     similarity_funs sfuns;
     const amrex::Real tol = amrex::Real(1.0e-5);
-    const amrex::Real WSMIN = amrex::Real(0.1); // minimum wind speed
+    const amrex::Real WSMIN = most_min_wind_speed; // minimum wind speed
 };
 
 
@@ -874,7 +883,7 @@ struct surface_flux_mod_charnock
             u_star_arr(i,j,k) = mdata.kappa * umm / (std::log(zref / z0) - psi_m);
             ++iter;
         } while ((std::abs(u_star_arr(i,j,k) - ustar) > tol) && iter <= max_iters);
-        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(iter < max_iters,
+        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(iter <= max_iters,
                                          "Maximum number of MOST iterations reached.");
 
         // Populate the stored MOST arrays
@@ -898,7 +907,7 @@ private:
     bool spec_qflux;
     similarity_funs sfuns;
     const amrex::Real tol = amrex::Real(1.0e-5);
-    const amrex::Real WSMIN = amrex::Real(0.1); // minimum wind speed
+    const amrex::Real WSMIN = most_min_wind_speed; // minimum wind speed
 };
 
 
@@ -1001,7 +1010,7 @@ struct surface_flux_donelan
             u_star_arr(i,j,k) = mdata.kappa * umm / (std::log(zref / z0) - psi_m);
             ++iter;
         } while ((std::abs(u_star_arr(i,j,k) - ustar) > tol) && iter <= max_iters);
-        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(iter < max_iters,
+        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(iter <= max_iters,
                                          "Maximum number of MOST iterations reached.");
 
         // Populate the stored MOST arrays
@@ -1025,7 +1034,7 @@ private:
     bool spec_qflux;
     similarity_funs sfuns;
     const amrex::Real tol = amrex::Real(1.0e-5);
-    const amrex::Real WSMIN = amrex::Real(0.1); // minimum wind speed
+    const amrex::Real WSMIN = most_min_wind_speed; // minimum wind speed
 };
 
 
@@ -1129,7 +1138,7 @@ struct surface_flux_wave_coupled
             u_star_arr(i,j,k) = mdata.kappa * umm / (std::log(zref / z0) - psi_m);
             ++iter;
         } while ((std::abs(u_star_arr(i,j,k) - ustar) > tol) && iter <= max_iters);
-        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(iter < max_iters,
+        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(iter <= max_iters,
                                          "Maximum number of MOST iterations reached.");
 
         // Populate the stored MOST arrays
@@ -1158,7 +1167,7 @@ private:
 #else
     const amrex::Real eps = amrex::Real(1e-15);
 #endif
-    const amrex::Real WSMIN  = amrex::Real(0.1); // minimum wind speed
+    const amrex::Real WSMIN  = most_min_wind_speed; // minimum wind speed
 };
 
 
@@ -1309,7 +1318,7 @@ struct surface_temp
 
             ++iter;
         } while ( (std::abs(zeta - zeta_old) > tol) && (iter <= max_iters) );
-        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(iter < max_iters,
+        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(iter <= max_iters,
                                          "Maximum number of MOST iterations reached.");
 
         // Populate the stored MOST arrays
@@ -1340,7 +1349,7 @@ private:
 
     const amrex::Real tol   = amrex::Real(1.0e-3);
     const amrex::Real alpha = myhalf;
-    const amrex::Real WSMIN = amrex::Real(0.1); // minimum wind speed
+    const amrex::Real WSMIN = most_min_wind_speed; // minimum wind speed
 };
 
 
@@ -1504,7 +1513,7 @@ struct surface_temp_charnock
 
             ++iter;
         } while ( (std::abs(zeta - zeta_old) > tol) && (iter <= max_iters) );
-        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(iter < max_iters,
+        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(iter <= max_iters,
                                          "Maximum number of MOST iterations reached.");
 
         // Populate the stored MOST arrays
@@ -1532,7 +1541,7 @@ private:
     const amrex::Real tol_z = amrex::Real(1.0e-10);
 #endif
     const amrex::Real alpha = myhalf;
-    const amrex::Real WSMIN = amrex::Real(0.1); // minimum wind speed
+    const amrex::Real WSMIN = most_min_wind_speed; // minimum wind speed
 };
 
 
@@ -1688,7 +1697,7 @@ struct surface_temp_mod_charnock
 
             ++iter;
         } while ( (std::abs(zeta - zeta_old) > tol) && (iter <= max_iters) );
-        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(iter < max_iters,
+        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(iter <= max_iters,
                                          "Maximum number of MOST iterations reached.");
 
         // Populate the stored MOST arrays
@@ -1716,7 +1725,7 @@ private:
     const amrex::Real tol_z = amrex::Real(1.0e-10);
 #endif
     const amrex::Real alpha = myhalf;
-    const amrex::Real WSMIN = amrex::Real(0.1); // minimum wind speed
+    const amrex::Real WSMIN = most_min_wind_speed; // minimum wind speed
 };
 
 
@@ -1869,7 +1878,7 @@ struct surface_temp_donelan
 
             ++iter;
         } while ( (std::abs(zeta - zeta_old) > tol) && (iter <= max_iters) );
-        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(iter < max_iters,
+        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(iter <= max_iters,
                                          "Maximum number of MOST iterations reached.");
 
         // Populate the stored MOST arrays
@@ -1897,7 +1906,7 @@ private:
     const amrex::Real tol_z = amrex::Real(1.0e-10);
 #endif
     const amrex::Real alpha = myhalf;
-    const amrex::Real WSMIN = amrex::Real(0.1); // minimum wind speed
+    const amrex::Real WSMIN = most_min_wind_speed; // minimum wind speed
 };
 
 
@@ -2051,7 +2060,7 @@ struct surface_temp_wave_coupled
 
             ++iter;
         } while ( (std::abs(zeta - zeta_old) > tol) && (iter <= max_iters) );
-        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(iter < max_iters,
+        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(iter <= max_iters,
                                          "Maximum number of MOST iterations reached.");
 
         // Populate the stored MOST arrays
@@ -2081,7 +2090,7 @@ private:
     const amrex::Real eps   = amrex::Real(1e-15);
 #endif
     const amrex::Real alpha = myhalf;
-    const amrex::Real WSMIN = amrex::Real(0.1); // minimum wind speed
+    const amrex::Real WSMIN = most_min_wind_speed; // minimum wind speed
 };
 
 
@@ -2403,7 +2412,7 @@ private:
     const amrex::Real eps = amrex::Real(1e-15);
 #endif
     bool is_low = true; // whether this is on the low or hi side face
-    amrex::Real   WSMIN = amrex::Real(0.1); // minimum wind speed
+    amrex::Real   WSMIN = most_min_wind_speed; // minimum wind speed
     int m_zlo = 0;
     int m_zhi = 0;
 };

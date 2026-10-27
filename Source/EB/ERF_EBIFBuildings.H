@@ -56,11 +56,11 @@ public:
      * 3. Pre-samples signed distances onto a reference grid
      * 4. Stores interpolation data for operator() calls
      */
-    BuildingsIF(std::string const& stl_file,
-                amrex::Real scale,
-                amrex::Array<amrex::Real, 3> const& center,
-                int reverse_normal,
-                amrex::Geometry const& geom)
+    BuildingsIF (std::string const& stl_file,
+                 amrex::Real scale,
+                 amrex::Array<amrex::Real, 3> const& center,
+                 int reverse_normal,
+                 amrex::Geometry const& geom)
         : m_geom(geom)
     {
         using namespace amrex;
@@ -155,16 +155,17 @@ public:
      * during construction, then replicated for fast operator() access.
      */
     AMREX_GPU_HOST_DEVICE inline
-    amrex::Real operator()(AMREX_D_DECL(amrex::Real x,
+    amrex::Real operator() (AMREX_D_DECL(amrex::Real x,
                                         amrex::Real y,
                                         amrex::Real z)) const noexcept
     {
         using namespace amrex;
 
-        // Convert physical coordinates to cell indices (floating point)
-        Real i_real = (x - m_problo[0]) / m_dx[0];
-        Real j_real = (y - m_problo[1]) / m_dx[1];
-        Real k_real = (z - m_problo[2]) / m_dx[2];
+        // fillSignedDistance samples at prob_lo + (index + 0.5) * dx.
+        // Convert physical coordinates to continuous cell-centered indices.
+        Real i_real = (x - m_problo[0]) / m_dx[0] - 0.5;
+        Real j_real = (y - m_problo[1]) / m_dx[1] - 0.5;
+        Real k_real = (z - m_problo[2]) / m_dx[2] - 0.5;
 
         // Get integer cell indices
         int i = static_cast<int>(std::floor(i_real));
@@ -206,7 +207,9 @@ public:
 
         Real phi = phi_0 * (1.0 - wz) + phi_1 * wz;
 
-        return phi;
+        // fillSignedDistance has the opposite sign to STLtools::fillFab,
+        // including with reversed normals. Match EB: positive solid, negative fluid.
+        return -phi;
     }
 
     /**
@@ -216,7 +219,7 @@ public:
      * \return Signed distance value.
      */
     AMREX_GPU_HOST_DEVICE inline
-    amrex::Real operator()(const amrex::RealArray& p) const noexcept
+    amrex::Real operator() (const amrex::RealArray& p) const noexcept
     {
         return this->operator()(AMREX_D_DECL(p[0], p[1], p[2]));
     }

@@ -77,6 +77,16 @@ ApplySpongeZoneBCsForCC (const SpongeChoice& spongeChoice,
     if(use_zlo_sponge_damping)AMREX_ALWAYS_ASSERT(zlo_sponge_end   > ProbLoArr[2]);
     if(use_zhi_sponge_damping)AMREX_ALWAYS_ASSERT(zhi_sponge_start < ProbHiArr[2]);
 
+    // Ramp lengths, computed here so that the kernels divide only by a valid length: the
+    // optimiser evaluates the guarded ramps of the sides that are switched off too, and the
+    // lengths of those sides (whose ends are never read from the inputs) can be zero
+    const Real L_xlo = use_xlo_sponge_damping ? (xlo_sponge_end - ProbLoArr[0]) : one;
+    const Real L_xhi = use_xhi_sponge_damping ? (ProbHiArr[0] - xhi_sponge_start) : one;
+    const Real L_ylo = use_ylo_sponge_damping ? (ylo_sponge_end - ProbLoArr[1]) : one;
+    const Real L_yhi = use_yhi_sponge_damping ? (ProbHiArr[1] - yhi_sponge_start) : one;
+    const Real L_zlo = use_zlo_sponge_damping ? (zlo_sponge_end - ProbLoArr[2]) : one;
+    const Real L_zhi = use_zhi_sponge_damping ? (ProbHiArr[2] - zhi_sponge_start) : one;
+
     ParallelFor(bx, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept
     {
         int ii = amrex::min(amrex::max(i, domlo_x), domhi_x);
@@ -93,7 +103,7 @@ ApplySpongeZoneBCsForCC (const SpongeChoice& spongeChoice,
         // x left sponge
         if(use_xlo_sponge_damping){
             if (x < xlo_sponge_end) {
-                Real xi = (xlo_sponge_end - x) / (xlo_sponge_end - ProbLoArr[0]);
+                Real xi = (xlo_sponge_end - x) / L_xlo;
                 cell_rhs(i, j, k, 0) -= sponge_strength * xi * xi * (cell_data(i, j, k, 0) - sponge_density);
                 cell_rhs(i, j, k, 1) -= sponge_strength * xi * xi * (cell_data(i, j, k, 1) - sponge_rhotheta);
                 if (n_qstate > 0) {
@@ -107,7 +117,7 @@ ApplySpongeZoneBCsForCC (const SpongeChoice& spongeChoice,
         // x right sponge
         if(use_xhi_sponge_damping){
             if (x > xhi_sponge_start) {
-                Real xi = (x - xhi_sponge_start) / (ProbHiArr[0] - xhi_sponge_start);
+                Real xi = (x - xhi_sponge_start) / L_xhi;
                 cell_rhs(i, j, k, 0) -= sponge_strength * xi * xi * (cell_data(i, j, k, 0) - sponge_density);
                 cell_rhs(i, j, k, 1) -= sponge_strength * xi * xi * (cell_data(i, j, k, 1) - sponge_rhotheta);
                 if (n_qstate > 0) {
@@ -122,7 +132,7 @@ ApplySpongeZoneBCsForCC (const SpongeChoice& spongeChoice,
         // y left sponge
         if(use_ylo_sponge_damping){
             if (y < ylo_sponge_end) {
-                Real xi = (ylo_sponge_end - y) / (ylo_sponge_end - ProbLoArr[1]);
+                Real xi = (ylo_sponge_end - y) / L_ylo;
                 cell_rhs(i, j, k, 0) -= sponge_strength * xi * xi * (cell_data(i, j, k, 0) - sponge_density);
                 cell_rhs(i, j, k, 1) -= sponge_strength * xi * xi * (cell_data(i, j, k, 1) - sponge_rhotheta);
                 if (n_qstate > 0) {
@@ -136,7 +146,7 @@ ApplySpongeZoneBCsForCC (const SpongeChoice& spongeChoice,
         // x right sponge
         if(use_yhi_sponge_damping){
             if (y > yhi_sponge_start) {
-                Real xi = (y - yhi_sponge_start) / (ProbHiArr[1] - yhi_sponge_start);
+                Real xi = (y - yhi_sponge_start) / L_yhi;
                 cell_rhs(i, j, k, 0) -= sponge_strength * xi * xi * (cell_data(i, j, k, 0) - sponge_density);
                 cell_rhs(i, j, k, 1) -= sponge_strength * xi * xi * (cell_data(i, j, k, 1) - sponge_rhotheta);
                 if (n_qstate > 0) {
@@ -151,7 +161,7 @@ ApplySpongeZoneBCsForCC (const SpongeChoice& spongeChoice,
         // x left sponge
         if(use_zlo_sponge_damping){
             if (z < zlo_sponge_end) {
-                Real xi = (zlo_sponge_end - z) / (zlo_sponge_end - ProbLoArr[2]);
+                Real xi = (zlo_sponge_end - z) / L_zlo;
                 cell_rhs(i, j, k, 0) -= sponge_strength * xi * xi * (cell_data(i, j, k, 0) - sponge_density);
                 cell_rhs(i, j, k, 1) -= sponge_strength * xi * xi * (cell_data(i, j, k, 1) - sponge_rhotheta);
                 if (n_qstate > 0) {
@@ -165,7 +175,7 @@ ApplySpongeZoneBCsForCC (const SpongeChoice& spongeChoice,
         // x right sponge
         if(use_zhi_sponge_damping){
             if (z > zhi_sponge_start) {
-                Real xi = (z - zhi_sponge_start) / (ProbHiArr[2] - zhi_sponge_start);
+                Real xi = (z - zhi_sponge_start) / L_zhi;
                 cell_rhs(i, j, k, 0) -= sponge_strength * xi * xi * (cell_data(i, j, k, 0) - sponge_density);
                 cell_rhs(i, j, k, 1) -= sponge_strength * xi * xi * (cell_data(i, j, k, 1) - sponge_rhotheta);
                 if (n_qstate > 0) {
@@ -261,6 +271,16 @@ ApplySpongeZoneBCsForMom (const SpongeChoice& spongeChoice,
     if(use_zlo_sponge_damping)AMREX_ALWAYS_ASSERT(zlo_sponge_end   > ProbLoArr[2]);
     if(use_zhi_sponge_damping)AMREX_ALWAYS_ASSERT(zhi_sponge_start < ProbHiArr[2]);
 
+    // Ramp lengths, computed here so that the kernels divide only by a valid length: the
+    // optimiser evaluates the guarded ramps of the sides that are switched off too, and the
+    // lengths of those sides (whose ends are never read from the inputs) can be zero
+    const Real L_xlo = use_xlo_sponge_damping ? (xlo_sponge_end - ProbLoArr[0]) : one;
+    const Real L_xhi = use_xhi_sponge_damping ? (ProbHiArr[0] - xhi_sponge_start) : one;
+    const Real L_ylo = use_ylo_sponge_damping ? (ylo_sponge_end - ProbLoArr[1]) : one;
+    const Real L_yhi = use_yhi_sponge_damping ? (ProbHiArr[1] - yhi_sponge_start) : one;
+    const Real L_zlo = use_zlo_sponge_damping ? (zlo_sponge_end - ProbLoArr[2]) : one;
+    const Real L_zhi = use_zhi_sponge_damping ? (ProbHiArr[2] - zhi_sponge_start) : one;
+
     ParallelFor(tbx, [=] AMREX_GPU_DEVICE(int i, int j, int k)
     {
         int ii = amrex::min(amrex::max(i, domlo_x), domhi_x);
@@ -268,21 +288,22 @@ ApplySpongeZoneBCsForMom (const SpongeChoice& spongeChoice,
 
         Real x = ProbLoArr[0] + ii * dx[0];
         Real y = ProbLoArr[1] + (jj+myhalf) * dx[1];
-        Real z = z_phys_cc(i,j,k);
+        // Height of the x-face
+        Real z = myhalf * (z_phys_cc(i-1,j,k) + z_phys_cc(i,j,k));
 
         Real sponge_density = (use_base) ? myhalf * (r0(i,j,k) + r0(i-1,j,k)) : sponge_density_tmp;
 
         // x lo sponge
         if(use_xlo_sponge_damping){
             if (x < xlo_sponge_end) {
-                Real xi = (xlo_sponge_end - x) / (xlo_sponge_end - ProbLoArr[0]);
+                Real xi = (xlo_sponge_end - x) / L_xlo;
                 rho_u_rhs(i, j, k) -= sponge_strength * xi * xi * (rho_u(i, j, k) - sponge_density*sponge_x_velocity);
             }
         }
         // x hi sponge
         if(use_xhi_sponge_damping){
             if (x > xhi_sponge_start) {
-                Real xi = (x - xhi_sponge_start) / (ProbHiArr[0] - xhi_sponge_start);
+                Real xi = (x - xhi_sponge_start) / L_xhi;
                 rho_u_rhs(i, j, k) -= sponge_strength * xi * xi * (rho_u(i, j, k) - sponge_density*sponge_x_velocity);
             }
         }
@@ -290,14 +311,14 @@ ApplySpongeZoneBCsForMom (const SpongeChoice& spongeChoice,
         // y lo sponge
         if(use_ylo_sponge_damping){
             if (y < ylo_sponge_end) {
-                Real xi = (ylo_sponge_end - y) / (ylo_sponge_end - ProbLoArr[1]);
+                Real xi = (ylo_sponge_end - y) / L_ylo;
                 rho_u_rhs(i, j, k) -= sponge_strength * xi * xi * (rho_u(i, j, k) - sponge_density*sponge_x_velocity);
             }
         }
         // x right sponge
         if(use_yhi_sponge_damping){
             if (y > yhi_sponge_start) {
-                Real xi = (y - yhi_sponge_start) / (ProbHiArr[1] - yhi_sponge_start);
+                Real xi = (y - yhi_sponge_start) / L_yhi;
                 rho_u_rhs(i, j, k) -= sponge_strength * xi * xi * (rho_u(i, j, k) - sponge_density*sponge_x_velocity);
             }
         }
@@ -305,7 +326,7 @@ ApplySpongeZoneBCsForMom (const SpongeChoice& spongeChoice,
         // z lo sponge
         if(use_zlo_sponge_damping){
             if (z < zlo_sponge_end) {
-                Real xi = (zlo_sponge_end - z) / (zlo_sponge_end - ProbLoArr[2]);
+                Real xi = (zlo_sponge_end - z) / L_zlo;
                 rho_u_rhs(i, j, k) -= sponge_strength * xi * xi * (rho_u(i, j, k) - sponge_density*sponge_x_velocity);
             }
         }
@@ -314,7 +335,7 @@ ApplySpongeZoneBCsForMom (const SpongeChoice& spongeChoice,
         // z hi sponge
         if(use_zhi_sponge_damping){
             if (z > zhi_sponge_start) {
-                Real xi = (z - zhi_sponge_start) / (ProbHiArr[2] - zhi_sponge_start);
+                Real xi = (z - zhi_sponge_start) / L_zhi;
                 rho_u_rhs(i, j, k) -= sponge_strength * xi * xi * (rho_u(i, j, k) - sponge_density*sponge_x_velocity);
             }
         }
@@ -328,21 +349,22 @@ ApplySpongeZoneBCsForMom (const SpongeChoice& spongeChoice,
 
         Real x = ProbLoArr[0] + (ii+myhalf) * dx[0];
         Real y = ProbLoArr[1] + jj * dx[1];
-        Real z = z_phys_cc(i,j,k);
+        // Height of the y-face
+        Real z = myhalf * (z_phys_cc(i,j-1,k) + z_phys_cc(i,j,k));
 
         Real sponge_density = (use_base) ?  myhalf * (r0(i,j,k) + r0(i,j-1,k)) : sponge_density_tmp;
 
         // x lo sponge
         if(use_xlo_sponge_damping){
             if (x < xlo_sponge_end) {
-                Real xi = (xlo_sponge_end - x) / (xlo_sponge_end - ProbLoArr[0]);
+                Real xi = (xlo_sponge_end - x) / L_xlo;
                 rho_v_rhs(i, j, k) -= sponge_strength * xi * xi * (rho_v(i, j, k) - sponge_density*sponge_y_velocity);
             }
         }
         // x hi sponge
         if(use_xhi_sponge_damping){
             if (x > xhi_sponge_start) {
-                Real xi = (x - xhi_sponge_start) / (ProbHiArr[0] - xhi_sponge_start);
+                Real xi = (x - xhi_sponge_start) / L_xhi;
                 rho_v_rhs(i, j, k) -= sponge_strength * xi * xi * (rho_v(i, j, k) - sponge_density*sponge_y_velocity);
             }
         }
@@ -350,14 +372,14 @@ ApplySpongeZoneBCsForMom (const SpongeChoice& spongeChoice,
         // y lo sponge
         if(use_ylo_sponge_damping){
             if (y < ylo_sponge_end) {
-                Real xi = (ylo_sponge_end - y) / (ylo_sponge_end - ProbLoArr[1]);
+                Real xi = (ylo_sponge_end - y) / L_ylo;
                 rho_v_rhs(i, j, k) -= sponge_strength * xi * xi * (rho_v(i, j, k) - sponge_density*sponge_y_velocity);
             }
         }
         // x right sponge
         if(use_yhi_sponge_damping){
             if (y > yhi_sponge_start) {
-                Real xi = (y - yhi_sponge_start) / (ProbHiArr[1] - yhi_sponge_start);
+                Real xi = (y - yhi_sponge_start) / L_yhi;
                 rho_v_rhs(i, j, k) -= sponge_strength * xi * xi * (rho_v(i, j, k) - sponge_density*sponge_y_velocity);
             }
         }
@@ -365,7 +387,7 @@ ApplySpongeZoneBCsForMom (const SpongeChoice& spongeChoice,
         // z lo sponge
         if(use_zlo_sponge_damping){
             if (z < zlo_sponge_end) {
-                Real xi = (zlo_sponge_end - z) / (zlo_sponge_end - ProbLoArr[2]);
+                Real xi = (zlo_sponge_end - z) / L_zlo;
                 rho_v_rhs(i, j, k) -= sponge_strength * xi * xi * (rho_v(i, j, k) - sponge_density*sponge_y_velocity);
             }
         }
@@ -374,7 +396,7 @@ ApplySpongeZoneBCsForMom (const SpongeChoice& spongeChoice,
         // z hi sponge
         if(use_zhi_sponge_damping){
             if (z > zhi_sponge_start) {
-                Real xi = (z - zhi_sponge_start) / (ProbHiArr[2] - zhi_sponge_start);
+                Real xi = (z - zhi_sponge_start) / L_zhi;
                 rho_v_rhs(i, j, k) -= sponge_strength * xi * xi * (rho_v(i, j, k) - sponge_density*sponge_y_velocity);
             }
         }
@@ -388,21 +410,24 @@ ApplySpongeZoneBCsForMom (const SpongeChoice& spongeChoice,
 
         Real x = ProbLoArr[0] + (ii+myhalf) * dx[0];
         Real y = ProbLoArr[1] + (jj+myhalf) * dx[1];
-        Real z = z_phys_nd(i,j,k);
+        // Height of the z-face centre: average of its four corner nodes, taken in pairs
+        // so that equal corner heights (no terrain) give back that height exactly
+        Real z = myhalf * ( myhalf * (z_phys_nd(i,j  ,k) + z_phys_nd(i+1,j  ,k))
+                          + myhalf * (z_phys_nd(i,j+1,k) + z_phys_nd(i+1,j+1,k)) );
 
         Real sponge_density = (use_base) ? myhalf * (r0(i,j,k) + r0(i,j,k-1)) : sponge_density_tmp;
 
         // x left sponge
         if(use_xlo_sponge_damping){
             if (x < xlo_sponge_end) {
-                Real xi = (xlo_sponge_end - x) / (xlo_sponge_end - ProbLoArr[0]);
+                Real xi = (xlo_sponge_end - x) / L_xlo;
                 rho_w_rhs(i, j, k) -= sponge_strength * xi * xi * (rho_w(i, j, k) - sponge_density*sponge_z_velocity);
             }
         }
         // x right sponge
         if(use_xhi_sponge_damping){
             if (x > xhi_sponge_start) {
-                Real xi = (x - xhi_sponge_start) / (ProbHiArr[0] - xhi_sponge_start);
+                Real xi = (x - xhi_sponge_start) / L_xhi;
                 rho_w_rhs(i, j, k) -= sponge_strength * xi * xi * (rho_w(i, j, k) - sponge_density*sponge_z_velocity);
             }
         }
@@ -410,14 +435,14 @@ ApplySpongeZoneBCsForMom (const SpongeChoice& spongeChoice,
         // y lo sponge
         if(use_ylo_sponge_damping){
             if (y < ylo_sponge_end) {
-                Real xi = (ylo_sponge_end - y) / (ylo_sponge_end - ProbLoArr[1]);
+                Real xi = (ylo_sponge_end - y) / L_ylo;
                 rho_w_rhs(i, j, k) -= sponge_strength * xi * xi * (rho_w(i, j, k) - sponge_density*sponge_z_velocity);
             }
         }
         // x right sponge
         if(use_yhi_sponge_damping){
             if (y > yhi_sponge_start) {
-                Real xi = (y - yhi_sponge_start) / (ProbHiArr[1] - yhi_sponge_start);
+                Real xi = (y - yhi_sponge_start) / L_yhi;
                 rho_w_rhs(i, j, k) -= sponge_strength * xi * xi * (rho_w(i, j, k) - sponge_density*sponge_z_velocity);
             }
         }
@@ -425,7 +450,7 @@ ApplySpongeZoneBCsForMom (const SpongeChoice& spongeChoice,
         // z lo sponge
         if(use_zlo_sponge_damping){
             if (z < zlo_sponge_end) {
-                Real xi = (zlo_sponge_end - z) / (zlo_sponge_end - ProbLoArr[2]);
+                Real xi = (zlo_sponge_end - z) / L_zlo;
                 rho_w_rhs(i, j, k) -= sponge_strength * xi * xi * (rho_w(i, j, k) - sponge_density*sponge_z_velocity);
             }
         }
@@ -434,7 +459,7 @@ ApplySpongeZoneBCsForMom (const SpongeChoice& spongeChoice,
         // z top sponge
         if(use_zhi_sponge_damping){
             if (z > zhi_sponge_start) {
-                Real xi = (z - zhi_sponge_start) / (ProbHiArr[2] - zhi_sponge_start);
+                Real xi = (z - zhi_sponge_start) / L_zhi;
                 rho_w_rhs(i, j, k) -= sponge_strength * xi * xi * (rho_w(i, j, k) - sponge_density*sponge_z_velocity);
             }
         }

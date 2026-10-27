@@ -10,6 +10,8 @@
 #include "ERF_IndexDefines.H"
 #include "ERF_DataStruct.H"
 
+#include <string>
+
 using PlaneVector = amrex::Vector<amrex::FArrayBox>;
 
 /** Collection of data structures and operations for reading data
@@ -21,6 +23,22 @@ class ReadBndryPlanes
 {
 
 public:
+    /// The slot (BCVars) a plane of variable var_name is stored in, the same slot
+    /// fill_from_bndryregs reads it from (cons_bc_comp of the component it
+    /// fills); -1 for a name that is not a plane variable.
+    static int plane_slot (const std::string& var_name)
+    {
+        if (var_name == "density")     { return BCVars::Rho_bc_comp; }
+        if (var_name == "theta")       { return BCVars::RhoTheta_bc_comp; }
+        if (var_name == "temperature") { return BCVars::RhoTheta_bc_comp; }
+        if (var_name == "ke")          { return BCVars::RhoKE_bc_comp; }
+        if (var_name == "scalar")      { return BCVars::RhoScalar_bc_comp; }
+        if (var_name == "qv")          { return BCVars::RhoQ1_bc_comp; }
+        if (var_name == "qc")          { return BCVars::RhoQ2_bc_comp; }
+        if (var_name == "velocity")    { return BCVars::xvel_bc; }
+        return -1;
+    }
+
     explicit ReadBndryPlanes (const amrex::Geometry& geom,
                               const amrex::Real& rdOcp_in);
 
@@ -42,15 +60,15 @@ public:
     // Return the pointer to PlaneVectors that have the tendency
     amrex::Vector<std::unique_ptr<PlaneVector>>& get_tendency (const double& time);
 
-    [[nodiscard]] double tinterp() const { return m_tinterp; }
+    [[nodiscard]] double tinterp () const { return m_tinterp; }
 
-    [[nodiscard]] int ingested_velocity() const {return is_velocity_read;}
-    [[nodiscard]] int ingested_theta()    const {return (is_temperature_read || is_theta_read);}
-    [[nodiscard]] int ingested_density()  const {return is_density_read;}
-    [[nodiscard]] int ingested_scalar()   const {return is_scalar_read;}
-    [[nodiscard]] int ingested_q1()       const {return is_q1_read;}
-    [[nodiscard]] int ingested_q2()       const {return is_q2_read;}
-    [[nodiscard]] int ingested_KE()       const {return is_KE_read;}
+    [[nodiscard]] int ingested_velocity () const {return is_velocity_read;}
+    [[nodiscard]] int ingested_theta ()    const {return (is_temperature_read || is_theta_read);}
+    [[nodiscard]] int ingested_density ()  const {return is_density_read;}
+    [[nodiscard]] int ingested_scalar ()   const {return is_scalar_read;}
+    [[nodiscard]] int ingested_q1 ()       const {return is_q1_read;}
+    [[nodiscard]] int ingested_q2 ()       const {return is_q2_read;}
+    [[nodiscard]] int ingested_KE ()       const {return is_KE_read;}
 
 private:
 

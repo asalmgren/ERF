@@ -2,28 +2,42 @@ name: Style
 
 on:
   push:
+    branches: [development]
   pull_request:
-    types: [opened, synchronize, reopened, closed]
+    types: [opened, synchronize, reopened]
 
 concurrency:
   group: ${{ github.event.pull_request.number || github.ref }}-${{ github.head_ref }}-style
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/development' }}
 
 jobs:
   tabs:
-    # The closed event exists only to cancel in-progress runs via concurrency.
-    if: github.event.action != 'closed'
     runs-on: ubuntu-22.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
       - name: Tabs
         run: .github/workflows/style/check_tabs.sh
 
   trailing_whitespaces:
-    # The closed event exists only to cancel in-progress runs via concurrency.
-    if: github.event.action != 'closed'
     runs-on: ubuntu-22.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
       - name: Trailing Whitespaces
         run: .github/workflows/style/check_trailing_whitespaces.sh
+
+  # Was its own workflow (codespell.yml); one workflow fewer to queue and to list as
+  # a required check, same job name.
+  codespell:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install codespell
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3-pip
+          pip3 install --user codespell
+      - name: Run codespell
+        run: codespell

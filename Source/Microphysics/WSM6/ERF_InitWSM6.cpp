@@ -8,18 +8,20 @@
 using namespace amrex;
 
 void
-WSM6::Init(const MultiFab& cons_in,
-           const BoxArray&,
-           const Geometry& geom,
-           const Real& dt_advance,
-           std::unique_ptr<MultiFab>& z_phys_nd,
-           std::unique_ptr<MultiFab>& detJ_cc)
+WSM6::Init (const MultiFab& cons_in,
+            const BoxArray&,
+            const Geometry& geom,
+            const Real& dt_advance,
+            std::unique_ptr<MultiFab>& z_phys_nd,
+            std::unique_ptr<MultiFab>& detJ_cc)
 {
     dt = dt_advance;
     m_geom = geom;
 
     m_z_phys_nd = z_phys_nd.get();
     m_detJ_cc = detJ_cc.get();
+
+    m_columns.define(cons_in.boxArray(), geom.Domain());
 
     MicVarMap.resize(m_qmoist_size);
     MicVarMap = {MicVar_WSM6::rain_accum, MicVar_WSM6::snow_accum, MicVar_WSM6::graup_accum};
@@ -38,6 +40,9 @@ WSM6::Init(const MultiFab& cons_in,
         mic_fab_vars[ivar]->setVal(0.0);
     }
 
+    m_sed.define(cons_in.boxArray(), cons_in.DistributionMap(),
+                 {RhoQ3_comp, RhoQ4_comp, RhoQ5_comp, RhoQ6_comp});
+
     nlev = m_geom.Domain().length(2);
     zlo = m_geom.Domain().smallEnd(2);
     zhi = m_geom.Domain().bigEnd(2);
@@ -46,14 +51,14 @@ WSM6::Init(const MultiFab& cons_in,
 }
 
 void
-WSM6::Copy_State_to_Micro(const MultiFab& cons_in)
+WSM6::Copy_State_to_Micro (const MultiFab& cons_in)
 {
     Copy_State_to_Micro(cons_in, nullptr);
 }
 
 void
-WSM6::Copy_State_to_Micro(const MultiFab& cons_in,
-                          const MultiFab* base_state)
+WSM6::Copy_State_to_Micro (const MultiFab& cons_in,
+                           const MultiFab* base_state)
 {
     assert_base_state_available(base_state);
     const bool use_anelastic_reference_pressure =
@@ -87,14 +92,14 @@ WSM6::Copy_State_to_Micro(const MultiFab& cons_in,
 }
 
 void
-WSM6::Update_Micro_Vars(MultiFab& cons_in,
-                        const MultiFab* base_state)
+WSM6::Update_Micro_Vars (MultiFab& cons_in,
+                         const MultiFab* base_state)
 {
     Copy_State_to_Micro(cons_in, base_state);
 }
 
 void
-WSM6::initialize_coeffs()
+WSM6::initialize_coeffs ()
 {
     using amrex::Real;
 

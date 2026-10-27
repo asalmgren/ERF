@@ -12,8 +12,6 @@
 
 using namespace amrex;
 
-
-
 /**
  * Compute vertical diffusivity using the Medium-Range Forecast (MRF) boundary layer scheme.
  *
@@ -50,6 +48,7 @@ ComputeDiffusivityMRF (const MultiFab& xvel,
                        const MoistureComponentIndices& moisture_indices,
                        const MultiFab* terrain_blank)
 {
+    const StratType pbl_strat = turbChoice.pbl_strat_type;
     /*
     ============================================================================
     Medium-Range Forecast (MRF) Boundary Layer Parameterization Scheme
@@ -89,9 +88,9 @@ ComputeDiffusivityMRF (const MultiFab& xvel,
        - K_t = K_m / Pr_t, and K_q = K_t (WRF diffuses moisture with the heat
          coefficient XKZH; module_bl_mrf.F L1069, L1180)
        - Stability enters only through w_s = u_* / φ_m (WRF's WSCALE); as in WRF there
-         is no regime test below the PBL top (module_bl_mrf.F L968-986).  See the
-         comment on the K-profile branch in the kernel for why the Ri-based mixing
-         that ERF used inside stable/neutral PBLs was removed.
+         is no regime test below the PBL top (module_bl_mrf.F L968-986).  The
+         Ri-based mixing ERF used to apply inside stable/neutral PBLs is gone with
+         it; see KNOWN LIMITATION below for what that costs in stable layers.
 
     4. Free Atmosphere Mixing via Richardson Number
        - Uses YSU stability functions (Hong et al. 2006)
@@ -196,9 +195,9 @@ ComputeDiffusivityMRF (const MultiFab& xvel,
     ---------------------------------
     With the K-profile applied in every regime, this scheme inherits WRF MRF's
     over-mixing of stable boundary layers: on GABLS1 its peak K_m is roughly
-    1.8x the Ri-based mixing ERF used previously and 2.1x YSUNew.  That is the
-    behaviour Hong et al. (2006) set out to fix in YSU, so stable cases that need
-    the weaker mixing should use the YSUNew scheme (erf.pbl_type = YSUNew).
+    2.1x YSUNew.  That is the behaviour Hong et al. (2006) set out to fix in YSU,
+    so stable cases that need the weaker mixing should use the YSUNew scheme
+    (erf.pbl_type = YSUNew).
 
     TESTING & VALIDATION:
     ---------------------
@@ -224,20 +223,49 @@ pblh_mf.setVal(0.0);
 // column of halo the diffusivity kernels already use, so nothing changes.
 const int ng_pblh = (turbChoice.enable_pblh_smoothing)
                   ? std::max(1, turbChoice.pblh_smoothing_passes) : 1;
+
+// The surface-layer fields carry one column of halo on the bottom surface; with more
+// smoothing passes than that, the PBLH passes read them from copies widened to ng_pblh
+// (see WidenForPBLH). Otherwise the fields are read directly.
+const auto widen_sfc = [&] (const MultiFab* mf) -> std::unique_ptr<MultiFab> {
+    if (mf == nullptr || std::min(mf->nGrowVect()[0], mf->nGrowVect()[1]) >= ng_pblh) {
+        return nullptr;
+    }
+    return WidenForPBLH(*mf, ng_pblh,
+                        [&] (MultiFab& wide) { SurfLayer->fill_planar_boundary(level, wide); });
+};
+const std::unique_ptr<MultiFab> u_star_wide = widen_sfc(SurfLayer->get_u_star(level));
+const std::unique_ptr<MultiFab> t_star_wide = widen_sfc(SurfLayer->get_t_star(level));
+const std::unique_ptr<MultiFab> q_star_wide = widen_sfc(SurfLayer->get_q_star(level));
+const std::unique_ptr<MultiFab> olen_wide   = widen_sfc(SurfLayer->get_olen(level));
+const MultiFab* u_star_src = (u_star_wide) ? u_star_wide.get() : SurfLayer->get_u_star(level);
+const MultiFab* t_star_src = (t_star_wide) ? t_star_wide.get() : SurfLayer->get_t_star(level);
+const MultiFab* q_star_src = (q_star_wide) ? q_star_wide.get() : SurfLayer->get_q_star(level);
+const MultiFab* olen_src   = (olen_wide)   ? olen_wide.get()   : SurfLayer->get_olen(level);
+
 if (ng_pblh > 1) {
-    const int ng_avail = std::min({cons_in.nGrowVect()[0], cons_in.nGrowVect()[1],
-                                   xvel.nGrowVect()[0],    xvel.nGrowVect()[1],
-                                   yvel.nGrowVect()[0],    yvel.nGrowVect()[1],
-                                   SurfLayer->get_u_star(level)->nGrowVect()[0],
-                                   SurfLayer->get_u_star(level)->nGrowVect()[1],
-                                   SurfLayer->get_olen(level)->nGrowVect()[0],
-                                   SurfLayer->get_olen(level)->nGrowVect()[1],
-                                   (terrain_blank) ? terrain_blank->nGrowVect()[0] : 1000,
-                                   (terrain_blank) ? terrain_blank->nGrowVect()[1] : 1000});
+    int ng_avail = std::min({cons_in.nGrowVect()[0], cons_in.nGrowVect()[1],
+                             xvel.nGrowVect()[0],    xvel.nGrowVect()[1],
+                             yvel.nGrowVect()[0],    yvel.nGrowVect()[1],
+                             u_star_src->nGrowVect()[0], u_star_src->nGrowVect()[1],
+                             olen_src->nGrowVect()[0],   olen_src->nGrowVect()[1],
+                             (terrain_blank) ? terrain_blank->nGrowVect()[0] : 1000,
+                             (terrain_blank) ? terrain_blank->nGrowVect()[1] : 1000});
+    // The PBLH passes also read these fields over the same widened region;
+    // a field that is not allocated (nullptr) is not read.
+    auto limit_by = [&ng_avail] (const auto* mf) {
+        if (mf) { ng_avail = std::min({ng_avail, mf->nGrowVect()[0], mf->nGrowVect()[1]}); }
+    };
+    limit_by(t_star_src);
+    limit_by(q_star_src);
+    limit_by(SurfLayer->get_mac_avg(level, 3));
+    limit_by(SurfLayer->get_mac_avg(level, 4));
+    limit_by(SurfLayer->get_lmask(level));
+    limit_by((use_terrain_fitted_coords) ? z_phys_nd.get() : nullptr);
     if (ng_pblh > ng_avail) {
         amrex::Abort("erf.pblh_smoothing_passes = " + std::to_string(turbChoice.pblh_smoothing_passes)
-                   + " needs " + std::to_string(ng_pblh) + " halo columns, but the state and "
-                     "surface-layer arrays carry only " + std::to_string(ng_avail)
+                   + " needs " + std::to_string(ng_pblh) + " halo columns, but the fields the "
+                     "PBLH passes read carry only " + std::to_string(ng_avail)
                    + "; reduce erf.pblh_smoothing_passes to at most " + std::to_string(ng_avail));
     }
 }
@@ -299,9 +327,9 @@ if (ng_pblh > 1) {
         const auto& vvel = yvel.const_array(mfi);
 
         const Real Ribcr = turbChoice.pbl_mrf_Ribcr;
-        const auto& u_star_arr = SurfLayer->get_u_star(level)->const_array(mfi);
-        const auto& t_star_arr = SurfLayer->get_t_star(level)->const_array(mfi);
-        const auto& l_obuk_arr = SurfLayer->get_olen(level)->const_array(mfi);
+        const auto& u_star_arr = u_star_src->const_array(mfi);
+        const auto& t_star_arr = t_star_src->const_array(mfi);
+        const auto& l_obuk_arr = olen_src->const_array(mfi);
         const auto& t10av_arr  = SurfLayer->get_mac_avg(level, 3)->const_array(mfi);
         const auto& q10av_arr  = SurfLayer->get_mac_avg(level, 4)->const_array(mfi);
         const auto& lmask_arr = (SurfLayer->get_lmask(level)) ?
@@ -320,7 +348,7 @@ if (ng_pblh > 1) {
         //
         // FIX: guard against null dereference of q_star when use_moisture is false (dry case)
         // get_q_star can return null pointer when the field is not allocated
-        amrex::MultiFab* q_star_mf = SurfLayer->get_q_star(level);
+        const amrex::MultiFab* q_star_mf = q_star_src;
         Array4<Real const> q_star_arr = (q_star_mf != nullptr) ? q_star_mf->const_array(mfi)
                                                                : Array4<Real const>{};
 
@@ -456,7 +484,11 @@ if (ng_pblh > 1) {
             if (above_critical) {
                 Real pblh_interp;
                 const Real rib_diff = Rib - Rib0;
-                if (std::abs(rib_diff) > Real(1.0e-10)) {
+                if (Rib0 >= Ribcr) {
+                    // The level below was at or above Ribcr too (only the surface cell can be):
+                    // WRF brint = 0, the height of that level, not an extrapolation above it
+                    pblh_interp = zval0;
+                } else if (std::abs(rib_diff) > Real(1.0e-10)) {
                     pblh_interp = zval0 + (zval - zval0) / rib_diff * (Ribcr - Rib0);
                 } else {
                     // If Rib not changing, use zval0 as PBL height
@@ -465,8 +497,11 @@ if (ng_pblh > 1) {
                 pblh_pred_arr(i, j, 0) = amrex::max(amrex::min(pblh_interp, pblh_max), pblh_min);
                 pbli_arr(i, j, 0) = kpbl;
             } else {
-                pblh_pred_arr(i, j, 0) = pblh_min;
-                pbli_arr(i, j, 0) = ksrf + 1;
+                // No crossing up to khi: the scan ended there with zval = z(khi), the top of
+                // the scan, capped by pblh_max, and kpbl = khi, so the K profile and the
+                // countergradient gates below cover the column (WRF module_bl_mrf.F, brint = 1).
+                pblh_pred_arr(i, j, 0) = amrex::max(amrex::min(zval, pblh_max), pblh_min);
+                pbli_arr(i, j, 0) = kpbl;
             }
         });
 
@@ -659,7 +694,11 @@ if (ng_pblh > 1) {
             if (above_critical) {
                 Real pblh_interp;
                 const Real rib_diff = Rib - Rib0;
-                if (std::abs(rib_diff) > Real(1.0e-10)) {
+                if (Rib0 >= Ribcr) {
+                    // The level below was at or above Ribcr too (only the surface cell can be):
+                    // WRF brint = 0, the height of that level, not an extrapolation above it
+                    pblh_interp = zval0;
+                } else if (std::abs(rib_diff) > Real(1.0e-10)) {
                     pblh_interp = zval0 + (zval - zval0) / rib_diff * (Ribcr - Rib0);
                 } else {
                     // If Rib not changing, use zval0 as PBL height
@@ -668,8 +707,11 @@ if (ng_pblh > 1) {
                 pblh_corr_arr(i, j, 0) = amrex::max(amrex::min(pblh_interp, pblh_max), pblh_min);
                 pbli_arr(i, j, 0) = kpbl;
             } else {
-                pblh_corr_arr(i, j, 0) = pblh_min;
-                pbli_arr(i, j, 0) = ksrf + 1;
+                // No crossing up to khi: the scan ended there with zval = z(khi), the top of
+                // the scan, capped by pblh_max, and kpbl = khi, so the K profile and the
+                // countergradient gates below cover the column (WRF module_bl_mrf.F, brint = 1).
+                pblh_corr_arr(i, j, 0) = amrex::max(amrex::min(zval, pblh_max), pblh_min);
+                pbli_arr(i, j, 0) = kpbl;
             }
             pblh_floor_arr(i, j, 0) = pblh_min;
         });
@@ -888,7 +930,9 @@ if (ng_pblh > 1) {
             if (above_critical_zero) {
                 pbli_zero_arr(i, j, 0) = kpbl_zero;
             } else {
-                pbli_zero_arr(i, j, 0) = ksrf + 1;
+                // No Ri = 0 crossing up to khi: the extent is the top of the scan, as for
+                // pbli_arr above (WRF module_bl_mrf.F, brint = 1)
+                pbli_zero_arr(i, j, 0) = kpbl_zero;
             }
         });
 
@@ -1045,13 +1089,16 @@ if (ng_pblh > 1) {
                 K_turb(i, j, k, EddyDiff::Theta_v) = K_turb(i, j, k, EddyDiff::Mom_v) / Prt;
                 K_turb(i, j, k, EddyDiff::Q_v) = K_turb(i, j, k, EddyDiff::Theta_v);
             } else if (k >= pbli_extent) {
+                // Free atmosphere above the PBL top.  This is the only branch left that
+                // reads resolved vertical gradients, but they are not evaluated anywhere
+                // near the surface.
                 const Real lambda = Real(150.0);
                 const Real lscale = (KAPPA * zval * lambda) / (KAPPA * zval + lambda);
                 Real dthetadz, dudz, dvdz;
                 ComputeVerticalDerivativesPBL(i, j, k, uvel, vvel, cell_data, izmin, izmax, pbl_derivative_dz_inv(i,j,k),
                                               c_ext_dir_on_zlo, c_ext_dir_on_zhi, u_ext_dir_on_zlo,
                                               u_ext_dir_on_zhi, v_ext_dir_on_zlo, v_ext_dir_on_zhi, dthetadz,
-                                              dudz, dvdz, moisture_indices);
+                                              dudz, dvdz, moisture_indices, pbl_strat);
 
                 const Real dudz_safe = (k < izmax) ? dudz : Real(0);
                 const Real dvdz_safe = (k < izmax) ? dvdz : Real(0);

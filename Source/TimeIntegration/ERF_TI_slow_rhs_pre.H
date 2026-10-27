@@ -1,5 +1,9 @@
 #include "ERF_SrcHeaders.H"
 
+#ifdef ERF_USE_FIRE
+#include <ERF_FireCoupler.H>
+#endif
+
 /**
  *  Wrapper for calling the routine that creates the slow RHS
  */
@@ -41,7 +45,9 @@
         if (solverChoice.coupling_type == CouplingType::TwoWay && finest_level > 0) {
             if (level < finest_level) {
                 fr_as_crse = getAdvFluxReg(level+1);
-                fr_as_crse->reset();
+                // Once per step: the anelastic RK2 integrator registers fluxes at both stages
+                // (RefluxStageWeight)
+                if (nrk == 0) { fr_as_crse->reset(); }
             }
             if (level > 0) {
                 fr_as_fine = getAdvFluxReg(level);
@@ -128,7 +134,29 @@
                      dptr_wbar_sub, d_rayleigh_ptrs_at_lev, d_sinesq_at_lev,
                      turbPert,
                      r_avg_to_pass, t_avg_to_pass,
+                     forest_drag, &S_old[IntVars::cons],
                      true);
+
+        // *****************************************************************************
+        // Inject the fire-to-atmosphere heat flux AFTER make_sources, which resets
+        // cc_src at every RK stage. The lagged fire flux (FireCoupler) is constant
+        // across all RK stages and must be added here to survive the integrator.
+        // *****************************************************************************
+#ifdef ERF_USE_FIRE
+        // on the level the fire grid refines; coarser levels get it by average-down.
+        // The heat and vapour with the WRF-Fire profile, then the smoke tracer,
+        // proportional to the fuel burnt (FireCoupler::add_sources).
+        if (m_fire_coupler && level == m_fire_coupler->level()) {
+            bool has_moisture = (solverChoice.moisture_type != MoistureType::None);
+            m_fire_coupler->add_sources(cc_src,
+                                        S_old[IntVars::cons],
+                                        *zpc_to_use,
+                                        zpn_to_use,
+                                        fine_geom,
+                                        has_moisture,
+                                        istep[level]);
+        }
+#endif
 
         // Heat flux from the building faces (immersed-boundary surface energy
         // balance), added to the freshly rebuilt source; no-op unless enabled.
@@ -213,7 +241,7 @@
                          dptr_wbar_sub, d_rayleigh_ptrs_at_lev, d_sinesq_at_lev, d_sinesq_stag_at_lev,
                          d_sponge_ptrs_at_lev,
                          (solverChoice.hindcast_lateral_forcing? &forecast_state_interp[level] : nullptr),
-                         input_sounding_data, lsf, lsf_data[level],
+                         sounding_at_level(level), lsf_at_level(level), lsf_data[level],
                          get_eb(level), true);
 
         // Nudging of the velocity towards observations at stations
@@ -241,8 +269,8 @@
                          z_t_rk[level], cc_src, xmom_src, ymom_src, zmom_src, buoyancy,
                          (level > 0) ? &zmom_crse_rhs[level] : nullptr,
                          Tau[level], Tau_corr[level], Tau_EB[level],
-                         SmnSmn, eddyDiffs, Hfx1, Hfx2, Hfx3, Q1fx1, Q1fx2, Q1fx3, Q2fx3, Diss, Hfx3_EB,
-                         fine_geom, solverChoice, m_SurfaceLayer, domain_bcs_type_d, domain_bcs_type,
+                         SmnSmn, eddyDiffs, Hfx1, Hfx2, Hfx3, Q1fx1, Q1fx2, Q1fx3, Q2fx3, Diss, mf_surface_fluxes,
+                         Hfx3_EB, fine_geom, solverChoice, m_SurfaceLayer, domain_bcs_type_d, domain_bcs_type,
                          *zpn_to_use, *zpc_to_use, *ax_to_use, *ay_to_use, *az_to_use, *dJ_to_use,
                          stretched_dz_d[level], gradp[level],
                          mapfac[level], get_eb(level),
@@ -277,14 +305,6 @@
             MultiFab scratch_ymom(S_data[IntVars::ymom].boxArray(),
                                   S_data[IntVars::ymom].DistributionMap(), 1,
                                   S_data[IntVars::ymom].nGrowVect());
-#ifdef ERF_IMPLICIT_W
-            /**
-             * @brief Temporary MultiFab for z-momentum updates.
-             */
-            MultiFab scratch_zmom(S_data[IntVars::zmom].boxArray(),
-                                  S_data[IntVars::zmom].DistributionMap(), 1,
-                                  S_data[IntVars::zmom].nGrowVect());
-#endif
             if (solverChoice.implicit_momentum_diffusion) {
                 MultiFab::Copy(scratch_xmom, S_old[IntVars::xmom], 0, 0, 1,  S_data[IntVars::xmom].nGrowVect()); // scratch := S_old
                 MultiFab::Saxpy(scratch_xmom, stage_dt, S_rhs[IntVars::xmom], 0, 0, 1, 0);                   // scratch := S_old + stage_dt*Src
@@ -293,11 +313,17 @@
                 MultiFab::Copy(scratch_ymom, S_old[IntVars::ymom], 0, 0, 1,  S_data[IntVars::ymom].nGrowVect()); // scratch := S_old
                 MultiFab::Saxpy(scratch_ymom, stage_dt, S_rhs[IntVars::ymom], 0, 0, 1, 0);                   // scratch := S_old + stage_dt*Src
                 scratch_ymom.FillBoundary(geom[level].periodicity());
-#ifdef ERF_IMPLICIT_W
-                MultiFab::Copy(scratch_zmom, S_old[IntVars::zmom], 0, 0, 1,  S_data[IntVars::zmom].nGrowVect()); // scratch := S_old
-                MultiFab::Saxpy(scratch_zmom, stage_dt, S_rhs[IntVars::zmom], 0, 0, 1, 0);                   // scratch := S_old + stage_dt*Src
-                scratch_zmom.FillBoundary(geom[level].periodicity());
-#endif
+            }
+
+            // The ghost cells of scratch still hold S_old; at a coarse/fine boundary fill them with
+            // the coarse data at the time we are advancing to, since a column that ends there is
+            // closed with the value on the other side
+            if (level > 0) {
+                const bool l_mom = solverChoice.implicit_momentum_diffusion;
+                Vector<MultiFab*> scratch_mom = {l_mom ? &scratch_xmom : nullptr,
+                                                 l_mom ? &scratch_ymom : nullptr,
+                                                 nullptr};
+                FillCoarseFineGhostsForImplicit(level, new_stage_time, scratch, {RhoTheta_comp}, scratch_mom);
             }
 
 #include "ERF_ImplicitPre.H"
@@ -314,11 +340,6 @@
                 MultiFab::Saxpy(scratch_ymom, -one_d, S_old[IntVars::ymom], 0, 0, 1, 0); // scratch  := (S_new - S_old)
                 scratch_ymom.mult(one_d / stage_dt);                                 // scratch  := (S_new - S_old) / stage_dt
                 MultiFab::Copy(S_rhs[IntVars::ymom], scratch_ymom, 0, 0, 1, 0);        // slow_rhs := (S_new - S_old) / stage_dt
-#ifdef ERF_IMPLICIT_W
-                MultiFab::Saxpy(scratch_zmom, -one_d, S_old[IntVars::zmom], 0, 0, 1, 0); // scratch  := (S_new - S_old)
-                scratch_zmom.mult(one_d / stage_dt);                                 // scratch  := (S_new - S_old) / stage_dt
-                MultiFab::Copy(S_rhs[IntVars::zmom], scratch_zmom, 0, 0, 1, 0);        // slow_rhs := (S_new - S_old) / stage_dt
-#endif
             }
         }
 
@@ -366,7 +387,10 @@
 #ifdef _OPENMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
 #endif
-           for ( MFIter mfi(*p0,TilingIfNotGPU()); mfi.isValid(); ++mfi)
+           // Tile only in x and y: the second kernel reads r0_tmp and rt0_tmp at k-1 and k+1,
+           //    which the first kernel fills tile by tile, so a tile boundary in z would read
+           //    values another thread may not have written yet
+           for ( MFIter mfi(*p0,TileNoZ()); mfi.isValid(); ++mfi)
            {
                const Array4<Real      > rt0_arr     = rt0.array(mfi);
                const Array4<Real      > rt0_tmp_arr = rt0_new.array(mfi);

@@ -405,7 +405,7 @@ SLM::Init (const int& /*lev*/,
  *  - Configures soil nudging and relaxation-height values.
  *  - Loads optional Noah-MP parameter tables and radiation settings.
  */
-void SLM::init_from_inputs()
+void SLM::init_from_inputs ()
 {
     ParmParse pp("slm");
     pp.query("landtype0", landtype0);
@@ -710,7 +710,7 @@ void SLM::init_from_inputs()
 
         amrex::Print() << " Read radiation forcing file '" << rad_input_file << "'" << std::endl;
         amrex::Print() << "   rad forcing file has " << num_rad_times << " time values, x = " << rad_x.len() << " y = " << rad_y.len() << std::endl;
-        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(m_lsm_geom.Domain().length(0) == rad_x.len() && m_lsm_geom.Domain().length(1) == rad_y.len(), "Radiation input file must have same X and Y dimensions!");
+        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(m_lsm_geom.Domain().length(0) == static_cast<int>(rad_x.len()) && m_lsm_geom.Domain().length(1) == static_cast<int>(rad_y.len()), "Radiation input file must have same X and Y dimensions!");
 
         BoxList bl_rad = ba_lsm_2d.boxList();
         for (auto& b : bl_rad) {
@@ -792,7 +792,7 @@ void SLM::init_from_inputs()
 /**
  * Loads the Noah-MP radiation lookup values used when no parameter file is supplied.
  */
-void SLM::load_builtin_radiation_parameters()
+void SLM::load_builtin_radiation_parameters ()
 {
     auto load_params = [](auto& params, const char* name, const auto& values)
     {
@@ -829,7 +829,7 @@ void SLM::load_builtin_radiation_parameters()
 /**
  * Initialize SLM
  */
-void SLM::slm_init()
+void SLM::slm_init ()
 {
     // validate the landtype flag
     const int landtype_min = landtype.min(0);
@@ -951,7 +951,7 @@ void SLM::slm_init()
 /**
  * Initializes local SLM fields from WRFInput data.
  */
-void SLM::init_wrfinput_vars()
+void SLM::init_wrfinput_vars ()
 {
     if (wrfinput_initialized) {
         return;
@@ -1146,6 +1146,7 @@ SLM::Lsm_Regrid_Level (const int& lev,
         for (int ivar = 0; ivar < static_cast<int>(unmapped_fields.size()); ++ivar) {
             source_unmapped[ivar] = saved_unmapped[ivar].get();
         }
+        source_has_atmos_state = has_atmos_state;
 
         Lsm_Interpolate_From_Source(old_geom, old_lsm_geom,
                                     IntVect(1), LSMTransferMode::ProcessedState);
@@ -1179,21 +1180,47 @@ SLM::Lsm_Interpolate_From_Source (const Geometry& source_geom,
     AMREX_ALWAYS_ASSERT(source_unmapped.size() == unmapped_fields.size());
 
     const IntVect rr2d(ref_ratio[0], ref_ratio[1], 1);
+
+    // This InterpFromCoarseLevel reads the coarse ghost cells as they are, and SLM
+    // never fills its fields' ghost cells, so they still hold the zeros of Init.
+    // Interpolate from a copy whose ghost cells between boxes (and across periodic
+    // boundaries) are filled; otherwise the fine cells next to a coarse box
+    // boundary get zeros (vegtype = 0, i.e. water). The copy leaves the source
+    // level's own ghost cells, which SLM writes to its checkpoints, as they were.
+    auto with_filled_ghosts = [] (const MultiFab& src, const Geometry& geom)
+    {
+        MultiFab tmp(src.boxArray(), src.DistributionMap(), src.nComp(), src.nGrowVect());
+        MultiFab::Copy(tmp, src, 0, 0, src.nComp(), src.nGrowVect());
+        tmp.FillBoundary(geom.periodicity());
+        return tmp;
+    };
+
+    // The vegetation and soil types are categories: a fine cell takes its coarse cell's,
+    // since a linear interpolation between two of them (17, water, and 5, say, along a
+    // coastline) gives a third (12, cropland) once SLM truncates it to an integer
+    auto interp_for = [] (int var) -> Interpolater*
+    {
+        return (var == LsmVar_SLM::vegtype || var == LsmVar_SLM::soiltype)
+            ? static_cast<Interpolater*>(&pc_interp) : static_cast<Interpolater*>(&cell_cons_interp);
+    };
+
     for (int ivar = 0; ivar < m_lsm_data_size; ++ivar) {
         AMREX_ALWAYS_ASSERT(source_data[ivar] != nullptr);
+        const MultiFab src = with_filled_ghosts(*source_data[ivar], source_lsm_geom);
         InterpFromCoarseLevel(*lsm_fab_vars[LsmDataMap[ivar]],
                               lsm_fab_vars[LsmDataMap[ivar]]->nGrowVect(),
-                              IntVect(0,0,0), *source_data[ivar], 0, 0, 1,
+                              IntVect(0,0,0), src, 0, 0, 1,
                               source_lsm_geom, m_lsm_geom, rr2d,
-                              &cell_cons_interp, m_domain_bcs_type,
+                              interp_for(LsmDataMap[ivar]), m_domain_bcs_type,
                               BCVars::cons_bc);
     }
 
     for (int ivar = 0; ivar < m_lsm_flux_size; ++ivar) {
         AMREX_ALWAYS_ASSERT(source_flux[ivar] != nullptr);
+        const MultiFab src = with_filled_ghosts(*source_flux[ivar], source_geom);
         InterpFromCoarseLevel(*lsm_fab_flux[LsmFluxMap[ivar]],
                               lsm_fab_flux[LsmFluxMap[ivar]]->nGrowVect(),
-                              IntVect(0,0,0), *source_flux[ivar], 0, 0, 1,
+                              IntVect(0,0,0), src, 0, 0, 1,
                               source_geom, m_geom, rr2d,
                               &cell_cons_interp, m_domain_bcs_type,
                               BCVars::cons_bc);
@@ -1201,13 +1228,20 @@ SLM::Lsm_Interpolate_From_Source (const Geometry& source_geom,
 
     for (int ivar = 0; ivar < static_cast<int>(unmapped_fields.size()); ++ivar) {
         AMREX_ALWAYS_ASSERT(source_unmapped[ivar] != nullptr);
+        const MultiFab src = with_filled_ghosts(*source_unmapped[ivar], source_lsm_geom);
         InterpFromCoarseLevel(*lsm_fab_vars[unmapped_fields[ivar]],
                               lsm_fab_vars[unmapped_fields[ivar]]->nGrowVect(),
-                              IntVect(0,0,0), *source_unmapped[ivar], 0, 0, 1,
+                              IntVect(0,0,0), src, 0, 0, 1,
                               source_lsm_geom, m_lsm_geom, rr2d,
-                              &cell_cons_interp, m_domain_bcs_type,
+                              interp_for(unmapped_fields[ivar]), m_domain_bcs_type,
                               BCVars::cons_bc);
     }
+
+    // tref, qref and pref were interpolated from the source, so they are only as
+    // good as the source's. A level made at initialization, before any
+    // Update_Lsm_Vars, gets zeros, and init_slm_vars must then run again once
+    // this level's own Update_Lsm_Vars has filled them.
+    has_atmos_state = source_has_atmos_state;
 
     if (mode == LSMTransferMode::RawInput) {
         first_step = true;
@@ -1217,6 +1251,7 @@ SLM::Lsm_Interpolate_From_Source (const Geometry& source_geom,
         initialize_zrefxy();
         first_step = false;
         wrfinput_initialized = use_wrfinput;
+        init_from_atmos_pending = !has_atmos_state;
     }
 }
 
@@ -1224,7 +1259,7 @@ SLM::Lsm_Interpolate_From_Source (const Geometry& source_geom,
  * Initializes the canopy-adjusted reference height on the current grid.
  */
 void
-SLM::initialize_zrefxy()
+SLM::initialize_zrefxy ()
 {
     const Real zlo = m_geom.ProbLo(2);
     const Real dz = m_geom.CellSize(2);
@@ -1336,7 +1371,7 @@ SLM::initialize_processed_state (const bool preserve_checkpoint_fields)
 /**
  * Helper function to set properties according to the IGBP class
  */
-void SLM::init_landtype()
+void SLM::init_landtype ()
 {
     const Real d_z0_soil = z0_soil;
 
@@ -1655,7 +1690,7 @@ void SLM::init_landtype()
 /**
  * Reads soil input file, initializes soil wetness and temperature
  */
-void SLM::init_soil_tw()
+void SLM::init_soil_tw ()
 {
     // TODO - read from input file
     const Real d_tabs_s = tabs_s;
@@ -1829,7 +1864,7 @@ void SLM::init_soil_tw()
 /**
  * Calculates center and face depths for each soil layer
  */
-void SLM::init_layer_depths()
+void SLM::init_layer_depths ()
 {
     const int d_khi_lsm = khi_lsm;
     const int d_klo_lsm = klo_lsm;
@@ -1874,7 +1909,7 @@ void SLM::init_layer_depths()
 /**
  * Initializes soil properties based on clay and sand percentages
  */
-void SLM::init_soil_vars()
+void SLM::init_soil_vars ()
 {
     const bool d_param_updated = params_updated;
 
@@ -1946,7 +1981,7 @@ void SLM::init_soil_vars()
     }
 }
 
-void SLM::init_slm_vars()
+void SLM::init_slm_vars ()
 {
     const int d_khi_lsm = khi_lsm;
 
@@ -2016,7 +2051,7 @@ void SLM::init_slm_vars()
 /**
  * Initializes diagnostics and radiation coupling fields from the SLM state.
  */
-void SLM::initialize_surface_outputs()
+void SLM::initialize_surface_outputs ()
 {
     const int d_khi_lsm = khi_lsm;
 
@@ -2110,7 +2145,7 @@ void SLM::initialize_surface_outputs()
 /**
  * Rebuilds restart fields that can be derived from the checkpoint state.
  */
-void SLM::rebuild_restart_fields()
+void SLM::rebuild_restart_fields ()
 {
     const int d_khi_lsm = khi_lsm;
 
@@ -2213,7 +2248,7 @@ void SLM::rebuild_restart_fields()
  *
  * Returns the vegetation and soil category names loaded from file as a vector of names.
  */
-SLMParameterTable SLM::ReadParameterFile(const std::string &filename, amrex::Vector<std::string> &veg_categories, amrex::Vector<std::string> &soil_categories)
+SLMParameterTable SLM::ReadParameterFile (const std::string &filename, amrex::Vector<std::string> &veg_categories, amrex::Vector<std::string> &soil_categories)
 {
     amrex::Print() << " SLM: Reading parameter file '" << filename << "'..." << std::endl;
 
@@ -2314,7 +2349,7 @@ SLMParameterTable SLM::ReadParameterFile(const std::string &filename, amrex::Vec
     return table;
 }
 
-void SLM::validate_parameter_tables()
+void SLM::validate_parameter_tables ()
 {
     using ParameterBlock = SLMParameterTable::mapped_type;
 
@@ -2527,7 +2562,7 @@ void SLM::validate_parameter_tables()
 /**
  * Overwrites any default SLM variables from values set in the parameter file
  */
-void SLM::init_from_params()
+void SLM::init_from_params ()
 {
     // do nothing if not using the parameter file
     if (!use_param_file) {
@@ -2638,7 +2673,7 @@ void SLM::init_from_params()
             if (landmask_arr(i, j, 0) == 1) {
 
                 const int ltype = landtype_arr(i,j,0) - 1; // shift by one to match table index (i.e, types 1-20 -> index 0-19)
-                const int stype = soiltype_arr(i,j,d_khi_lsm) - 1;
+                const int stype = static_cast<int>(soiltype_arr(i,j,d_khi_lsm)) - 1;
 
                 // Set soil parameters from parameter file
                 for (int k = d_khi_lsm; k >= d_klo_lsm; k--) {
@@ -2711,7 +2746,7 @@ void SLM::init_from_params()
  * Updates LAI and SAI based on the current simulation time and monthly values
  * from the LAI and SAI tables.
  */
-void SLM::UpdateLAI(const amrex::MFIter &mfi)
+void SLM::UpdateLAI (const amrex::MFIter &mfi)
 {
     if (interpolate_lai) {
         Box box = mfi.tilebox();
@@ -2719,7 +2754,7 @@ void SLM::UpdateLAI(const amrex::MFIter &mfi)
 
         auto landmask_arr = landmask.const_array(mfi);
         auto landtype_arr = landtype.const_array(mfi);
-        auto vegetype_arr = vegetype.const_array(mfi);
+        // auto vegetype_arr = vegetype.const_array(mfi);
         auto LAI_arr = LAI.array(mfi);
         auto SAI_arr = SAI.array(mfi);
 
@@ -2735,19 +2770,23 @@ void SLM::UpdateLAI(const amrex::MFIter &mfi)
         static constexpr double dpy[] = {0.0  ,  31.0,  59.0,  90.0, 120.0, 151.0,
                                         181.0, 212.0, 243.0, 273.0, 304.0, 334.0};
         bool leap = (m_orbital_year % 4 == 0 && (!(m_orbital_year % 100 == 0) || (m_orbital_year % 400 == 0))) ? true : false;
-        m_calday = dpy[m_orbital_mon-1] + (m_orbital_day-1.0) + m_orbital_sec/86400.0;
-        // add extra day if leap year
-        if (leap) { m_calday += one; }
+        // In a leap year, 29 February shifts the start of every month from March on by
+        // one day; the dates, the month boundaries and the year end must all agree on it.
+        const Real leap_day = (leap) ? one : zero;
+        auto month_start = [&] (const int m) { return dpy[m] + ((m >= 2) ? leap_day : zero); };
 
         int curr_mon = m_orbital_mon - 1;
         int next_mon = curr_mon + 1;
-        Real t0 = dpy[curr_mon];
+        m_calday = month_start(curr_mon) + (m_orbital_day-1.0) + m_orbital_sec/86400.0;
+
+        Real t0 = month_start(curr_mon);
         Real t1;
-        if (next_mon >= 11) {
+        if (next_mon > 11) {
+            // December interpolates toward the following January
             next_mon = 0;
-            t1 = 365.0;
+            t1 = 365.0 + leap_day;
         } else {
-            t1 = dpy[next_mon];
+            t1 = month_start(next_mon);
         }
 
         const Real d_calday = m_calday;
@@ -2854,7 +2893,7 @@ void SLM::UpdateLAI(const amrex::MFIter &mfi)
 /**
  * Updates radiation parameters related to LAI
  */
-void SLM::UpdateLAIParameters(const amrex::MFIter &mfi)
+void SLM::UpdateLAIParameters (const amrex::MFIter &mfi)
 {
     Box box = mfi.tilebox();
     box.makeSlab(2, 0);
@@ -3121,7 +3160,7 @@ SLM::AdvanceSLM ()
                 return;
             }
 
-            amrex::Real q_gr;
+            amrex::Real q_gr_loc;
 
             // SAM rhow[nz] = air density at vertical velocity levels, kg/m^3
             amrex::Real rhow = dref_arr(i, j, 0); // TODO: double check this
@@ -3167,8 +3206,8 @@ SLM::AdvanceSLM ()
                 erf_qsati(t_canop_arr(i, j, 0), pref_arr(i, j, 0), qsat_canop);
             }
 
-            q_gr = q_gr_arr(i, j, 0);
-            q_cas_arr(i, j, 0) = qref_arr(i, j, 0) * cond_vref + qsat_canop*cond_vcnp + q_gr*cond_vundercnp;
+            q_gr_loc = q_gr_arr(i, j, 0);
+            q_cas_arr(i, j, 0) = qref_arr(i, j, 0) * cond_vref + qsat_canop*cond_vcnp + q_gr_loc*cond_vundercnp;
 
             // Output variables
             tveg_arr(i, j, 0) = t_canop_arr(i, j, 0);
@@ -3211,7 +3250,7 @@ SLM::AdvanceSLM ()
 }
 
 
-void SLM::transfer_coeff(const amrex::MFIter &mfi)
+void SLM::transfer_coeff (const amrex::MFIter &mfi)
 {
     const int d_khi_lsm = khi_lsm;
     const Real dt = m_dt;
@@ -3435,7 +3474,7 @@ void SLM::transfer_coeff(const amrex::MFIter &mfi)
     });
 }
 
-void SLM::resistances(const amrex::MFIter &mfi)
+void SLM::resistances (const amrex::MFIter &mfi)
 {
     const int d_khi_lsm = khi_lsm;
     const int d_nz_lsm = m_nz_lsm;
@@ -3725,7 +3764,7 @@ void SLM::resistances(const amrex::MFIter &mfi)
     });
 }
 
-void SLM::fluxes_canopy(const amrex::MFIter &mfi)
+void SLM::fluxes_canopy (const amrex::MFIter &mfi)
 {
     const int d_khi_lsm = khi_lsm;
     const int d_nz_lsm = m_nz_lsm;
@@ -3782,7 +3821,7 @@ void SLM::fluxes_canopy(const amrex::MFIter &mfi)
         if (landmask_arr(i, j, 0) != 1) {
             return;
         }
-        amrex::Real evapo_wet;
+        amrex::Real evapo_wet_loc;
 
         if (vegetype_arr(i, j, 0) == 1)
         {
@@ -3809,10 +3848,10 @@ void SLM::fluxes_canopy(const amrex::MFIter &mfi)
 
                 // direct evaporation from the water held on canopy
                 // evaporation/dew only possible if canopy temperature is above freezing
-                evapo_wet = std::min(mw_arr(i, j, 0)/dt_iter, ((qsat_canop - q_sfc_arr(i, j, 0)) * rhow * LAI_arr(i, j, 0) / (r_b_arr(i, j, 0))*vege_YES_arr(i, j, 0)));
+                evapo_wet_loc = std::min(mw_arr(i, j, 0)/dt_iter, ((qsat_canop - q_sfc_arr(i, j, 0)) * rhow * LAI_arr(i, j, 0) / (r_b_arr(i, j, 0))*vege_YES_arr(i, j, 0)));
 
                 // increment/decrement of the water amount held on leaves following the direct evaporation/dew formation
-                const amrex::Real mw_evap_inc = -dt_iter * evapo_wet; // evapo_wet [kg/m2s=mm/s]
+                const amrex::Real mw_evap_inc = -dt_iter * evapo_wet_loc; // evapo_wet_loc [kg/m2s=mm/s]
                 mw_inc_arr(i, j, 0) += mw_evap_inc;
                 mw_arr(i, j, 0) += mw_evap_inc;
                 wet_canop_arr(i, j, 0) = std::min(amrex::Real(one), mw_arr(i, j, 0)/mw_mx_arr(i, j, 0));
@@ -3840,11 +3879,11 @@ void SLM::fluxes_canopy(const amrex::MFIter &mfi)
                 }
 
                 // Convert evaporation (kg/m2/s) to latent heat flux (W/m2)
-                lhf_canop_arr(i, j, 0) = lcond*(evapo_wet+evapo_dry_arr(i, j, 0));
-                evp_canop_arr(i, j, 0) = evapo_wet + evapo_dry_arr(i, j, 0);
+                lhf_canop_arr(i, j, 0) = lcond*(evapo_wet_loc+evapo_dry_arr(i, j, 0));
+                evp_canop_arr(i, j, 0) = evapo_wet_loc + evapo_dry_arr(i, j, 0);
                 lhf0 += lhf_canop_arr(i, j, 0);
                 evp0 += evp_canop_arr(i, j, 0);
-                evapo_wet0 += evapo_wet;
+                evapo_wet0 += evapo_wet_loc;
 
                 // Update vegetation moisture storage
                 if (mw_arr(i, j, 0) > mw_mx_arr(i, j, 0))
@@ -3875,14 +3914,14 @@ void SLM::fluxes_canopy(const amrex::MFIter &mfi)
             evp_canop_arr(i, j, 0) = zero;
             wet_canop_arr(i, j, 0) = zero;
             mw_arr(i, j, 0) = zero;
-            evapo_wet = zero;
+            evapo_wet_loc = zero;
             evapo_dry_arr(i, j, 0) = zero;
             t_canop_arr(i, j, 0) = tr_arr(i, j, 0);
         }
     });
 }
 
-void SLM::solve_ground_skin_temperature(const amrex::MFIter &mfi)
+void SLM::solve_ground_skin_temperature (const amrex::MFIter &mfi)
 {
     const int d_khi_lsm = khi_lsm;
     const Real dt = m_dt;
@@ -4169,7 +4208,7 @@ void SLM::solve_ground_skin_temperature(const amrex::MFIter &mfi)
     });
 }
 
-void SLM::soil_water(const amrex::MFIter &mfi)
+void SLM::soil_water (const amrex::MFIter &mfi)
 {
     const int d_khi_lsm = khi_lsm;
     const int d_klo_lsm = klo_lsm;
@@ -4214,7 +4253,7 @@ void SLM::soil_water(const amrex::MFIter &mfi)
 
         amrex::Real aa, bb, cc, dd;
             amrex::Real precip_in = zero;
-        amrex::Real precip_sfc = prsfc_arr(i, j, 0);
+        amrex::Real precip_sfc_loc = prsfc_arr(i, j, 0);
 
         if (landtype_arr(i, j, 0) == 15) {
             // ice
@@ -4247,7 +4286,7 @@ void SLM::soil_water(const amrex::MFIter &mfi)
             }
             if (any_less_than_one && soilt_arr(i, j, d_khi_lsm) >= tfriz)
             {
-                precip_in = (1.-IMPERV_arr(i, j, 0))*std::min(precip_sfc + mws_arr(i, j, 0)/dt, ks_arr(i, j, d_khi_lsm));
+                precip_in = (1.-IMPERV_arr(i, j, 0))*std::min(precip_sfc_loc + mws_arr(i, j, 0)/dt, ks_arr(i, j, d_khi_lsm));
             } else {
                 precip_in = zero;
             }
@@ -4427,7 +4466,7 @@ void SLM::soil_water(const amrex::MFIter &mfi)
                 precip_in -= excess_water/dt;
             }
             slm_diag_arr(i, j, 0, SLM_Diag::precip_in) = precip_in;
-            mws_arr(i, j, 0) = std::max(amrex::Real(zero), mws_arr(i, j, 0) + (precip_sfc - precip_in)*dt);
+            mws_arr(i, j, 0) = std::max(amrex::Real(zero), mws_arr(i, j, 0) + (precip_sfc_loc - precip_in)*dt);
 
             amrex::Real drain = zero;
             if(mws_arr(i, j, 0) > mws_mx_arr(i, j, 0))
@@ -4445,7 +4484,7 @@ void SLM::soil_water(const amrex::MFIter &mfi)
     });
 }
 
-void SLM::soil_temperature(const amrex::MFIter &mfi)
+void SLM::soil_temperature (const amrex::MFIter &mfi)
 {
     const int d_khi_lsm = khi_lsm;
     const int d_klo_lsm = klo_lsm;
@@ -4608,7 +4647,7 @@ void SLM::soil_temperature(const amrex::MFIter &mfi)
     });
 }
 
-void SLM::soil_nudging(const amrex::MFIter &mfi3d)
+void SLM::soil_nudging (const amrex::MFIter &mfi3d)
 {
     if (!dosoiltnudging && !dosoilwnudging) return;
 
@@ -4657,7 +4696,7 @@ void SLM::soil_nudging(const amrex::MFIter &mfi3d)
 }
 
 AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
-amrex::Real SLM::fh_calc(const amrex::Real &t, const amrex::Real &mps, const amrex::Real &sw, const amrex::Real &B)
+amrex::Real SLM::fh_calc (const amrex::Real &t, const amrex::Real &mps, const amrex::Real &sw, const amrex::Real &B)
 {
     amrex::Real moist_pot1 = std::max(amrex::Real(-100000.0), mps / (std::pow(std::max(amrex::Real(0.0001), sw), B)) / amrex::Real(1000.0));
     return std::min(amrex::Real(one), std::exp(moist_pot1*CONST_GRAV/amrex::Real(461.0)/t));
@@ -4665,8 +4704,8 @@ amrex::Real SLM::fh_calc(const amrex::Real &t, const amrex::Real &mps, const amr
 
 AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
 amrex::Real
-SLM::linear_interp(const amrex::Real t0, const amrex::Real t1, const amrex::Real t,
-                   const amrex::Real x, const amrex::Real y)
+SLM::linear_interp (const amrex::Real t0, const amrex::Real t1, const amrex::Real t,
+                    const amrex::Real x, const amrex::Real y)
 {
   // returns a value that is linearly interpolated between x and y at time t. x
   // is at t=t0, y is at t=t1.
@@ -4677,7 +4716,7 @@ SLM::linear_interp(const amrex::Real t0, const amrex::Real t1, const amrex::Real
   return x + (y - x) * dt;
 }
 
-void SLM::Copy_State_to_Lsm(const MultiFab& cons_in, const MultiFab& u_in, const MultiFab& v_in)
+void SLM::Copy_State_to_Lsm (const MultiFab& cons_in, const MultiFab& u_in, const MultiFab& v_in)
 {
     int khi = khi_lsm;
 
@@ -4742,6 +4781,7 @@ void SLM::Copy_State_to_Lsm(const MultiFab& cons_in, const MultiFab& u_in, const
             slm_zenith(i, j, khi) = slm_zenith(i, j, 0);
         });
     }
+    has_atmos_state = true;
 
 #ifdef ERF_USE_NETCDF
     if (rad_input_file != "")
@@ -4815,7 +4855,7 @@ void SLM::Copy_State_to_Lsm(const MultiFab& cons_in, const MultiFab& u_in, const
 
 
 void
-SLM::set_precip_input(const amrex::MultiFab* precip_in)
+SLM::set_precip_input (const amrex::MultiFab* precip_in)
 {
     int khi = khi_lsm;
 
@@ -4844,8 +4884,8 @@ SLM::set_precip_input(const amrex::MultiFab* precip_in)
 }
 
 void
-SLM::set_terrain_inputs(const amrex::Vector<std::unique_ptr<amrex::MultiFab>>& sst_in,
-                        const amrex::Vector<std::unique_ptr<amrex::iMultiFab>>& lmask_in)
+SLM::set_terrain_inputs (const amrex::Vector<std::unique_ptr<amrex::MultiFab>>& sst_in,
+                         const amrex::Vector<std::unique_ptr<amrex::iMultiFab>>& lmask_in)
 {
     if (!first_step)
     {
@@ -4908,7 +4948,7 @@ SLM::set_terrain_inputs(const amrex::Vector<std::unique_ptr<amrex::MultiFab>>& s
 }
 
 
-void SLM::Copy_Lsm_to_State(MultiFab& cons_in)
+void SLM::Copy_Lsm_to_State (MultiFab& cons_in)
 {
     for ( amrex::MFIter mfi(cons_in,amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
         const auto& box3d = mfi.tilebox();
@@ -4930,10 +4970,10 @@ void SLM::Copy_Lsm_to_State(MultiFab& cons_in)
     cons_in.FillBoundary(m_geom.periodicity());
 }
 
-void SLM::writeSLM_Data(const PlotFileType plotfile_type, const amrex::Real time, const std::string plot_prefix, const int level_step, const int /*lev*/, const int /*finest_lev*/, amrex::MultiFab &fab, amrex::Geometry &geom, amrex::Vector<std::string> &varnames)
+void SLM::writeSLM_Data (const PlotFileType plotfile_type, const amrex::Real cur_time, const std::string plot_prefix, const int level_step, const int /*lev*/, const int /*finest_lev*/, amrex::MultiFab &fab, amrex::Geometry &geom, amrex::Vector<std::string> &varnames)
 {
 #ifndef ERF_USE_NETCDF
-    amrex::ignore_unused(time, plot_prefix, level_step);
+    amrex::ignore_unused(cur_time, plot_prefix, level_step);
 #endif
     geom.define(amrex::makeSlab(m_lsm_geom.Domain(), 2, 0), m_lsm_geom.ProbDomain(), m_lsm_geom.Coord(), m_lsm_geom.isPeriodic());
 
@@ -5074,14 +5114,14 @@ void SLM::writeSLM_Data(const PlotFileType plotfile_type, const amrex::Real time
     AMREX_ALWAYS_ASSERT(static_cast<int>(varnames.size()) == output_size);
 
     if (plotfile_type == PlotFileType::Amrex) {
-        //amrex::WriteSingleLevelPlotfile(plotfilename, fab, varnames, lsm_2d_geom, time, level_step);
+        //amrex::WriteSingleLevelPlotfile(plotfilename, fab, varnames, lsm_2d_geom, cur_time, level_step);
 #ifdef ERF_USE_NETCDF
         // Temporarily write NetCDF always
-        //writeSLM_NetCDF(fab, varnames, time, plot_prefix, level_step);
+        //writeSLM_NetCDF(fab, varnames, cur_time, plot_prefix, level_step);
 #endif
 #ifdef ERF_USE_NETCDF
     } else if (plotfile_type == PlotFileType::Netcdf) {
-        writeSLM_NetCDF(fab, varnames, time, plot_prefix, level_step);
+        writeSLM_NetCDF(fab, varnames, cur_time, plot_prefix, level_step);
 #endif
     } else {
         Abort("Dont know this plot_filetype");
@@ -5098,10 +5138,10 @@ void SLM::writeSLM_Data(const PlotFileType plotfile_type, const amrex::Real time
 // from BATS
 // ----------------------------------------------------------------------
 AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
-void SLM::snow_age_noahmp(amrex::Real dt, amrex::Real tg, amrex::Real sneqvo, amrex::Real sneqv,
-                          amrex::Real tau0, amrex::Real grain_growth, amrex::Real extra_growth,
-                          amrex::Real dirt_soot, amrex::Real swemx,
-                          amrex::Real& tauss, amrex::Real& fage)
+void SLM::snow_age_noahmp (amrex::Real dt, amrex::Real tg, amrex::Real sneqvo, amrex::Real sneqv,
+                           amrex::Real tau0, amrex::Real grain_growth, amrex::Real extra_growth,
+                           amrex::Real dirt_soot, amrex::Real swemx,
+                           amrex::Real& tauss, amrex::Real& fage)
 {
     //input
     //  DT        !main time step (s)
@@ -5151,11 +5191,11 @@ void SLM::snow_age_noahmp(amrex::Real dt, amrex::Real tg, amrex::Real sneqvo, am
 // SUBROUTINE SNOWALB_BATS
 // --------------------------------------------------------------------------------------------------
 AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
-void SLM::snowalb_bats_noahmp(int /*nband*/, amrex::Real /*fsno*/, amrex::Real cosz, amrex::Real fage,
-                              amrex::Real bats_cosz, amrex::Real bats_vis_new, amrex::Real bats_nir_new,
-                              amrex::Real bats_vis_age, amrex::Real bats_nir_age,
-                              amrex::Real bats_vis_dir, amrex::Real bats_nir_dir,
-                              amrex::Real* albsnd, amrex::Real* albsni)
+void SLM::snowalb_bats_noahmp (int /*nband*/, amrex::Real /*fsno*/, amrex::Real cosz, amrex::Real fage,
+                               amrex::Real bats_cosz, amrex::Real bats_vis_new, amrex::Real bats_nir_new,
+                               amrex::Real bats_vis_age, amrex::Real bats_nir_age,
+                               amrex::Real bats_vis_dir, amrex::Real bats_nir_dir,
+                               amrex::Real* albsnd, amrex::Real* albsni)
 {
     // --------------------------------------------------------------------------------------------------
     // input
@@ -5206,11 +5246,11 @@ void SLM::snowalb_bats_noahmp(int /*nband*/, amrex::Real /*fsno*/, amrex::Real c
 // SUBROUTINE GROUNDALB
 // --------------------------------------------------------------------------------------------------
 AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
-void SLM::groundalb_noahmp(int /*nsoil*/, int nband, int /*ice*/, int ist, amrex::Real fsno,
-                           const amrex::Real* smc, const amrex::Real* albsnd, const amrex::Real* albsni,
-                           amrex::Real cosz, amrex::Real tg,
-                           const amrex::Real* albsat, const amrex::Real* albdry, const amrex::Real* alblak,
-                           amrex::Real* albgrd, amrex::Real* albgri)
+void SLM::groundalb_noahmp (int /*nsoil*/, int nband, int /*ice*/, int ist, amrex::Real fsno,
+                            const amrex::Real* smc, const amrex::Real* albsnd, const amrex::Real* albsni,
+                            amrex::Real cosz, amrex::Real tg,
+                            const amrex::Real* albsat, const amrex::Real* albdry, const amrex::Real* alblak,
+                            amrex::Real* albgrd, amrex::Real* albgri)
 {
     // --------------------------------------------------------------------------------------------------
     //input
@@ -5268,15 +5308,15 @@ void SLM::groundalb_noahmp(int /*nsoil*/, int nband, int /*ice*/, int ist, amrex
 // flux given an underlying surface with known albedo.
 // --------------------------------------------------------------------------------------------------
 AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
-void SLM::twostream_noahmp(int ib, int ic, int /*vegtyp*/, amrex::Real cosz, amrex::Real vai,
-                           amrex::Real fwet, amrex::Real t, const amrex::Real* albgrd, const amrex::Real* albgri,
-                           const amrex::Real* rho, const amrex::Real* tau, amrex::Real fveg, int /*ist*/,
-                           amrex::Real xl, amrex::Real omegas_param, amrex::Real betads, amrex::Real betais,
-                           int opt_rad, amrex::Real rc, amrex::Real hvt, amrex::Real hvb, amrex::Real /*den*/,
-                           amrex::Real* fab, amrex::Real* fre, amrex::Real* ftd, amrex::Real* fti,
-                           amrex::Real& gdir, amrex::Real* frev, amrex::Real* freg,
-                           amrex::Real& bgap, amrex::Real& wgap,
-                           amrex::Real& xl_out, amrex::Real& chil_out, amrex::Real& phi1_out, amrex::Real& phi2_out)
+void SLM::twostream_noahmp (int ib, int ic, int /*vegtyp*/, amrex::Real cosz, amrex::Real vai,
+                            amrex::Real fwet, amrex::Real t, const amrex::Real* albgrd, const amrex::Real* albgri,
+                            const amrex::Real* rho, const amrex::Real* tau, amrex::Real fveg, int /*ist*/,
+                            amrex::Real xl, amrex::Real omegas_param, amrex::Real betads, amrex::Real betais,
+                            int opt_rad, amrex::Real rc, amrex::Real hvt, amrex::Real hvb, amrex::Real /*den*/,
+                            amrex::Real* fab, amrex::Real* fre, amrex::Real* ftd, amrex::Real* fti,
+                            amrex::Real& gdir, amrex::Real* frev, amrex::Real* freg,
+                            amrex::Real& bgap, amrex::Real& wgap,
+                            amrex::Real& xl_out, amrex::Real& chil_out, amrex::Real& phi1_out, amrex::Real& phi2_out)
 {
     // --------------------------------------------------------------------------------------------------
     // input
@@ -5321,7 +5361,7 @@ void SLM::twostream_noahmp(int ib, int ic, int /*vegtyp*/, amrex::Real cosz, amr
     amrex::Real tmp0,tmp1,tmp2,tmp3,tmp4,tmp5,tmp6,tmp7,tmp8,tmp9;
     amrex::Real p1,p2,p3,p4,s1,s2,u1,u2,u3;
     amrex::Real b,c,d,d1,d2,f,h,h1,h2,h3,h4,h5,h6,h7,h8,h9,h10;
-    amrex::Real phi1,phi2,sigma;
+    amrex::Real phi1,phi2,sigma_ts;
     amrex::Real ftds,ftis,fres;
     amrex::Real denfveg;
     //jref:start
@@ -5337,8 +5377,10 @@ void SLM::twostream_noahmp(int ib, int ic, int /*vegtyp*/, amrex::Real cosz, amr
     amrex::Real thetap;   //angle conversion from SZA
     amrex::Real fa;       //foliage volume density (m-1)
     amrex::Real newvai;   //effective LSAI (-)
-    amrex::Real kopen;    //gap fraction for diffue light (-)
-    amrex::Real gap;      //total gap fraction for beam ( <=1-shafac )
+    // Set below for opt_rad = 1, 2 or 3 (the only values); initialised so that no
+    // path reads them unset.
+    amrex::Real kopen = one; //gap fraction for diffue light (-)
+    amrex::Real gap   = one; //total gap fraction for beam ( <=1-shafac )
 
     // -----------------------------------------------------------------
     // compute within and between gaps
@@ -5426,8 +5468,8 @@ void SLM::twostream_noahmp(int ib, int ic, int /*vegtyp*/, amrex::Real cosz, amr
     f = tmp0 * omega*(1.0-betad);
     tmp1 = b*b - c*c;
     h = std::sqrt(tmp1) / avmu;
-    sigma = tmp0*tmp0 - tmp1;
-        if ( std::abs(sigma) < 1.0e-6 ) sigma = (sigma >= zero) ? 1.0e-6 : -1.0e-6;
+    sigma_ts = tmp0*tmp0 - tmp1;
+        if ( std::abs(sigma_ts) < 1.0e-6 ) sigma_ts = (sigma_ts >= zero) ? 1.0e-6 : -1.0e-6;
     p1 = b + avmu*h;
     p2 = b - avmu*h;
     p3 = b + tmp0;
@@ -5450,12 +5492,12 @@ void SLM::twostream_noahmp(int ib, int ic, int /*vegtyp*/, amrex::Real cosz, amr
     tmp5 = u2 - avmu*h;
     d2 = tmp4/s1 - tmp5*s1;
     h1 = -d*p4 - c*f;
-    tmp6 = d - h1*p3/sigma;
-    tmp7 = ( d - c - h1/sigma*(u1+tmp0) ) * s2;
+    tmp6 = d - h1*p3/sigma_ts;
+    tmp7 = ( d - c - h1/sigma_ts*(u1+tmp0) ) * s2;
     h2 = ( tmp6*tmp2/s1 - p2*tmp7 ) / d1;
     h3 = - ( tmp6*tmp3*s1 - p1*tmp7 ) / d1;
     h4 = -f*p3 - c*d;
-    tmp8 = h4/sigma;
+    tmp8 = h4/sigma_ts;
     tmp9 = ( u3 - tmp8*(u2-tmp0) ) * s2;
     h5 = - ( tmp8*tmp4/s1 + tmp9 ) / d2;
     h6 = ( tmp8*tmp5*s1 + tmp9 ) / d2;
@@ -5469,7 +5511,7 @@ void SLM::twostream_noahmp(int ib, int ic, int /*vegtyp*/, amrex::Real cosz, amr
 
     if (ic == 0) {
         ftds = s2                           *(1.0-gap) + gap;
-        ftis = (h4*s2/sigma + h5*s1 + h6/s1)*(1.0-gap);
+        ftis = (h4*s2/sigma_ts + h5*s1 + h6/s1)*(1.0-gap);
     } else {
         ftds = zero;
         ftis = (h9*s1 + h10/s1)*(1.0-kopen) + kopen;
@@ -5480,8 +5522,8 @@ void SLM::twostream_noahmp(int ib, int ic, int /*vegtyp*/, amrex::Real cosz, amr
     // flux reflected by the surface (veg. and ground)
 
     if (ic == 0) {
-        fres   = (h1/sigma + h2 + h3)*(1.0-gap  ) + albgrd[ib]*gap;
-        freveg = (h1/sigma + h2 + h3)*(1.0-gap  );
+        fres   = (h1/sigma_ts + h2 + h3)*(1.0-gap  ) + albgrd[ib]*gap;
+        freveg = (h1/sigma_ts + h2 + h3)*(1.0-gap  );
         frebar = albgrd[ib]*gap;                   //jref - separate veg. and ground reflection
     } else {
         fres   = (h7 + h8) *(1.0-kopen) + albgri[ib]*kopen;
@@ -5503,14 +5545,14 @@ void SLM::twostream_noahmp(int ib, int ic, int /*vegtyp*/, amrex::Real cosz, amr
 // SUBROUTINE SURRAD
 // --------------------------------------------------------------------------------------------------
 AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
-void SLM::surrad_noahmp(amrex::Real mpe, amrex::Real fsun, amrex::Real fsha, amrex::Real elai, amrex::Real vai,
-                        amrex::Real laisun, amrex::Real laisha, const amrex::Real* solad, const amrex::Real* solai,
-                        const amrex::Real* fabd, const amrex::Real* fabi, const amrex::Real* ftdd,
-                        const amrex::Real* ftid, const amrex::Real* ftii, const amrex::Real* albgrd,
-                        const amrex::Real* albgri, const amrex::Real* albd, const amrex::Real* albi,
-                        const amrex::Real* frevd, const amrex::Real* frevi, const amrex::Real* fregd, const amrex::Real* fregi,
-                        amrex::Real& parsun, amrex::Real& parsha, amrex::Real& sav, amrex::Real& sag,
-                        amrex::Real& fsa, amrex::Real& fsr, amrex::Real& fsrv, amrex::Real& fsrg)
+void SLM::surrad_noahmp (amrex::Real mpe, amrex::Real fsun, amrex::Real fsha, amrex::Real elai, amrex::Real vai,
+                         amrex::Real laisun, amrex::Real laisha, const amrex::Real* solad, const amrex::Real* solai,
+                         const amrex::Real* fabd, const amrex::Real* fabi, const amrex::Real* ftdd,
+                         const amrex::Real* ftid, const amrex::Real* ftii, const amrex::Real* albgrd,
+                         const amrex::Real* albgri, const amrex::Real* albd, const amrex::Real* albi,
+                         const amrex::Real* frevd, const amrex::Real* frevi, const amrex::Real* fregd, const amrex::Real* fregi,
+                         amrex::Real& parsun, amrex::Real& parsha, amrex::Real& sav, amrex::Real& sag,
+                         amrex::Real& fsa, amrex::Real& fsr, amrex::Real& fsrv, amrex::Real& fsrg)
 {
     // --------------------------------------------------------------------------------------------------
     // input
@@ -5623,7 +5665,7 @@ void SLM::surrad_noahmp(amrex::Real mpe, amrex::Real fsun, amrex::Real fsha, amr
 // --------------------------------------------------------------------------------------------------
 // SUBROUTINE RADIATION_NOAHMP - Main NOAHMP radiation routine
 // --------------------------------------------------------------------------------------------------
-void SLM::radiation_noahmp(const amrex::MFIter &mfi)
+void SLM::radiation_noahmp (const amrex::MFIter &mfi)
 {
     const int d_khi_lsm = khi_lsm;
     const int d_opt_rad = opt_rad;

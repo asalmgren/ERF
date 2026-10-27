@@ -16,7 +16,9 @@
  * angle from UTC and the site longitude, the zenith, the clockwise-from-north
  * azimuth, the Earth-Sun distance) is kept here: the radiation models use
  * the CESM orbital formulation of ERF_OrbCosZenith.H, which gives no
- * azimuth. The clear-sky formulas follow Bird (1984) as used by the SLUCM
+ * azimuth and has no equation of time; orbital_hour_angle() turns its
+ * calendar day into the hour angle these functions take, for
+ * erf.ibseb.sun_mode = two_stream. The clear-sky formulas follow Bird (1984) as used by the SLUCM
  * branch. The ray cast is new here.
  *
  * **Sun vector convention.** ``ibseb_sun_vector()`` returns the unit vector
@@ -30,22 +32,45 @@
  */
 namespace ibseb {
 
+/**
+ * Day angle [rad] of Spencer's (1971) series, 2 pi (day - 1) / 365. The
+ * series' coefficients were fitted with this day angle; the declination, the
+ * equation of time and the Earth-Sun distance below all use it, so day 366
+ * gives the same values as day 1.
+ */
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+amrex::Real spencer_day_angle (amrex::Real day_of_year)
+{
+    return 2.0 * PI * (day_of_year - 1.0) / 365.0;
+}
+
+/**
+ * Day of year at a UTC time: the start day plus the whole days elapsed since
+ * 00:00 UTC of that day (t_utc_s may exceed 86400 s in a multi-day run). The
+ * Spencer series repeat every 365 days, so the result needs no wrapping.
+ */
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+amrex::Real day_of_year_at (amrex::Real day0, amrex::Real t_utc_s)
+{
+    return day0 + std::floor(t_utc_s / 86400.0);
+}
+
 /** Solar declination [rad] from the day of year (Spencer 1971). */
 AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
 amrex::Real solar_declination (amrex::Real day_of_year)
 {
-    const amrex::Real gamma = 2.0 * PI * (day_of_year - 1.0) / 365.25;
+    const amrex::Real gamma = spencer_day_angle(day_of_year);
     return 0.006918
         - 0.399912 * std::cos(gamma) + 0.070257 * std::sin(gamma)
         - 0.006758 * std::cos(2.0 * gamma) + 0.000907 * std::sin(2.0 * gamma)
-        - 0.00248 * std::cos(3.0 * gamma) + 0.00031 * std::sin(3.0 * gamma);
+        - 0.002697 * std::cos(3.0 * gamma) + 0.00148 * std::sin(3.0 * gamma);
 }
 
 /** Equation of time [minutes] from the day of year (Spencer 1971). */
 AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
 amrex::Real equation_of_time (amrex::Real day_of_year)
 {
-    const amrex::Real gamma = 2.0 * PI * (day_of_year - 1.0) / 365.25;
+    const amrex::Real gamma = spencer_day_angle(day_of_year);
     return 229.18 * (0.000075 + 0.001868 * std::cos(gamma) - 0.032077 * std::sin(gamma)
                      - 0.014615 * std::cos(2.0 * gamma) - 0.040849 * std::sin(2.0 * gamma));
 }
@@ -63,6 +88,25 @@ amrex::Real solar_hour_angle (amrex::Real time_utc_s, amrex::Real longitude_deg,
     if (t_utc_h < 0.0) { t_utc_h += 24.0; }
     const amrex::Real t_solar_h = t_utc_h + longitude_deg / 15.0 + equation_of_time(day_of_year) / 60.0;
     return 15.0 * (t_solar_h - 12.0) * PI / 180.0;
+}
+
+/**
+ * Hour angle [rad] of the orbital formula the radiation models use
+ * (orbital_cos_zenith_instant() of ERF_OrbCosZenith.H): its
+ * ``cos z = sin(lat) sin(decl) - cos(lat) cos(decl) cos(2 pi frac(calday) + lon)``
+ * is the usual form with the hour angle ``2 pi frac(calday) + lon - pi``. The
+ * fraction of the calendar day is the UTC time of day and there is no equation
+ * of time, so local solar time is UTC plus one hour per 15 degrees of
+ * longitude. Wrapped to [-pi, pi), negative in the morning.
+ */
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+amrex::Real orbital_hour_angle (double calday, amrex::Real longitude_rad)
+{
+    const double two_pi = 2.0 * double(PI);
+    double h = two_pi * (calday - std::floor(calday)) + double(longitude_rad) - double(PI);
+    h = std::fmod(h + double(PI), two_pi);
+    if (h < 0.0) { h += two_pi; }
+    return static_cast<amrex::Real>(h - double(PI));
 }
 
 /** Zenith angle [rad] from the latitude, declination and hour angle. */
@@ -108,7 +152,7 @@ amrex::Real solar_azimuth (amrex::Real latitude_deg, amrex::Real decl,
 AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
 amrex::Real earth_sun_distance_factor (amrex::Real day_of_year)
 {
-    const amrex::Real G = 2.0 * PI * (day_of_year - 1.0) / 365.0;
+    const amrex::Real G = spencer_day_angle(day_of_year);
     return 1.000110 + 0.034221 * std::cos(G) + 0.001280 * std::sin(G)
          + 0.000719 * std::cos(2.0 * G) + 0.000077 * std::sin(2.0 * G);
 }

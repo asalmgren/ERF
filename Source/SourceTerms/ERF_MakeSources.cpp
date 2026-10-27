@@ -9,6 +9,7 @@
 #include <ERF_NumericalDiffusion.H>
 #include <ERF_PlaneAverage.H>
 #include <ERF_SrcHeaders.H>
+#include <ERF_CanopyTurbulence.H>
 #include <ERF_TI_slow_headers.H>
 #include <ERF_MOSTStress.H>
 
@@ -31,6 +32,8 @@ using namespace amrex;
  * @param[in] dptr_wbar_sub  subsidence source term
  * @param[in] d_rayleigh_ptrs_at_lev  Vector of {strength of Rayleigh damping, reference value of theta} used to define Rayleigh damping
  * @param[in] d_sinesq_at_lev  sin( (pi/2) (z-z_t)/(damping depth)) at cell centers
+ * @param[in] forest_drag  forest drag field C_d LAD, or null without a forest
+ * @param[in] cons_old  conserved state at the start of the step, read by the canopy TKE source
  */
 
 void make_sources (int level,
@@ -58,6 +61,8 @@ void make_sources (int level,
                    TurbulentPerturbation& turbPert,
                    const Table1D<Real> r_plane_avg,
                    const Table1D<Real> t_plane_avg,
+                   const MultiFab* forest_drag,
+                   const MultiFab* cons_old,
                    bool is_slow_step)
 {
     BL_PROFILE_REGION("erf_make_sources()");
@@ -97,6 +102,12 @@ void make_sources (int level,
 
     // flag for a moisture model
     bool has_moisture = (solverChoice.moisture_type != MoistureType::None);
+
+    // Canopy terms of the k-eqn RANS model (erf.forest_canopy_tke); check_config
+    // has already required a forest and kEqn on every level
+    const bool use_canopy_tke = is_slow_step && solverChoice.canopyTurb.enabled;
+    AMREX_ALWAYS_ASSERT_WITH_MESSAGE(!use_canopy_tke || (forest_drag && cons_old),
+        "erf.forest_canopy_tke needs the forest drag field and the old state in make_sources");
 
     // *****************************************************************************
     // Planar averages for subsidence terms and immersed forcing
@@ -226,6 +237,7 @@ void make_sources (int level,
     //    7. sponging
     //    8. turbulent perturbation
     //    9. nudging towards input sounding values (only for theta)
+    //    9b. canopy wake production and short-circuit dissipation for (rho KE)
     //   10a. Immersed forcing for terrain
     //   10b. Immersed forcing for buildings
     //   Real(11.) Four stream radiation source for (rho theta)
@@ -391,26 +403,17 @@ void make_sources (int level,
         // *************************************************************************************
         if (solverChoice.custom_w_subsidence && is_slow_step && solverChoice.do_theta_advection) {
             const int n = RhoTheta_comp;
-            if (solverChoice.custom_forcing_prim_vars) {
-                const int nr = Rho_comp;
-                ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
-                {
-                    Real dzInv = (z_cc_arr) ? one/ (z_cc_arr(i,j,k+1) - z_cc_arr(i,j,k-1)) : myhalf*dxInv[2];
-                    Real T_hi = dptr_t_plane(k+1) / dptr_r_plane(k+1);
-                    Real T_lo = dptr_t_plane(k-1) / dptr_r_plane(k-1);
-                    Real wbar_cc = myhalf * (dptr_wbar_sub[k] + dptr_wbar_sub[k+1]);
-                    cell_src(i, j, k, n) -= cell_data(i,j,k,nr) * wbar_cc * (T_hi - T_lo) * dzInv;
-                });
-            } else {
-                ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
-                {
-                    Real dzInv = (z_cc_arr) ? one/ (z_cc_arr(i,j,k+1) - z_cc_arr(i,j,k-1)) : myhalf*dxInv[2];
-                    Real T_hi = dptr_t_plane(k+1) / dptr_r_plane(k+1);
-                    Real T_lo = dptr_t_plane(k-1) / dptr_r_plane(k-1);
-                    Real wbar_cc = myhalf * (dptr_wbar_sub[k] + dptr_wbar_sub[k+1]);
-                    cell_src(i, j, k, n) -= wbar_cc * (T_hi - T_lo) * dzInv;
-                });
-            }
+            // -w dtheta/dz is a tendency of theta whichever way the custom forcing is
+            //    specified, so it is weighted by the cell density to give one of rho*theta
+            const int nr = Rho_comp;
+            ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+            {
+                Real dzInv = (z_cc_arr) ? one/ (z_cc_arr(i,j,k+1) - z_cc_arr(i,j,k-1)) : myhalf*dxInv[2];
+                Real T_hi = dptr_t_plane(k+1) / dptr_r_plane(k+1);
+                Real T_lo = dptr_t_plane(k-1) / dptr_r_plane(k-1);
+                Real wbar_cc = myhalf * (dptr_wbar_sub[k] + dptr_wbar_sub[k+1]);
+                cell_src(i, j, k, n) -= cell_data(i,j,k,nr) * wbar_cc * (T_hi - T_lo) * dzInv;
+            });
         }
 
         // *************************************************************************************
@@ -418,32 +421,20 @@ void make_sources (int level,
         // *************************************************************************************
         if (solverChoice.custom_w_subsidence && (solverChoice.moisture_type != MoistureType::None) && is_slow_step) {
             const int nv = RhoQ1_comp;
-            if (solverChoice.custom_forcing_prim_vars) {
-                const int nr = Rho_comp;
-                ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
-                {
-                    Real dzInv = (z_cc_arr) ? one/ (z_cc_arr(i,j,k+1) - z_cc_arr(i,j,k-1)) : myhalf*dxInv[2];
-                    Real Qv_hi = dptr_qv_plane(k+1) / dptr_r_plane(k+1);
-                    Real Qv_lo = dptr_qv_plane(k-1) / dptr_r_plane(k-1);
-                    Real Qc_hi = dptr_qc_plane(k+1) / dptr_r_plane(k+1);
-                    Real Qc_lo = dptr_qc_plane(k-1) / dptr_r_plane(k-1);
-                    Real wbar_cc = myhalf * (dptr_wbar_sub[k] + dptr_wbar_sub[k+1]);
-                    cell_src(i, j, k, nv  ) -= cell_data(i,j,k,nr) * wbar_cc * (Qv_hi - Qv_lo) * dzInv;
-                    cell_src(i, j, k, nv+1) -= cell_data(i,j,k,nr) * wbar_cc * (Qc_hi - Qc_lo) * dzInv;
-                });
-            } else {
-                ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
-                {
-                    Real dzInv = (z_cc_arr) ? one/ (z_cc_arr(i,j,k+1) - z_cc_arr(i,j,k-1)) : myhalf*dxInv[2];
-                    Real Qv_hi = dptr_qv_plane(k+1) / dptr_r_plane(k+1);
-                    Real Qv_lo = dptr_qv_plane(k-1) / dptr_r_plane(k-1);
-                    Real Qc_hi = dptr_qc_plane(k+1) / dptr_r_plane(k+1);
-                    Real Qc_lo = dptr_qc_plane(k-1) / dptr_r_plane(k-1);
-                    Real wbar_cc = myhalf * (dptr_wbar_sub[k] + dptr_wbar_sub[k+1]);
-                    cell_src(i, j, k, nv  ) -= wbar_cc * (Qv_hi - Qv_lo) * dzInv;
-                    cell_src(i, j, k, nv+1) -= wbar_cc * (Qc_hi - Qc_lo) * dzInv;
-                });
-            }
+            // -w dq/dz is a tendency of the mixing ratios whichever way the custom forcing is
+            //    specified, so it is weighted by the cell density to give one of rho*q
+            const int nr = Rho_comp;
+            ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+            {
+                Real dzInv = (z_cc_arr) ? one/ (z_cc_arr(i,j,k+1) - z_cc_arr(i,j,k-1)) : myhalf*dxInv[2];
+                Real Qv_hi = dptr_qv_plane(k+1) / dptr_r_plane(k+1);
+                Real Qv_lo = dptr_qv_plane(k-1) / dptr_r_plane(k-1);
+                Real Qc_hi = dptr_qc_plane(k+1) / dptr_r_plane(k+1);
+                Real Qc_lo = dptr_qc_plane(k-1) / dptr_r_plane(k-1);
+                Real wbar_cc = myhalf * (dptr_wbar_sub[k] + dptr_wbar_sub[k+1]);
+                cell_src(i, j, k, nv  ) -= cell_data(i,j,k,nr) * wbar_cc * (Qv_hi - Qv_lo) * dzInv;
+                cell_src(i, j, k, nv+1) -= cell_data(i,j,k,nr) * wbar_cc * (Qc_hi - Qc_lo) * dzInv;
+            });
         }
 
         // *************************************************************************************
@@ -487,6 +478,16 @@ void make_sources (int level,
             auto m_ixtype = S_data[IntVars::cons].boxArray().ixType(); // Conserved term
             const amrex::Array4<const amrex::Real>& pert_cell = turbPert.pb_cell[level].const_array(mfi);
             turbPert.apply_tpi(level, bx, RhoTheta_comp, m_ixtype, cell_src, pert_cell); // Applied as source term
+        }
+
+        // *************************************************************************************
+        // 9b. Add the canopy wake production and short-circuit dissipation to (rho KE)
+        // *************************************************************************************
+        if (use_canopy_tke) {
+            AddCanopyTKESources(bx, cell_src, cell_data, cons_old->const_array(mfi),
+                                xvel.const_array(mfi), yvel.const_array(mfi), zvel.const_array(mfi),
+                                forest_drag->const_array(mfi), t_blank_arr,
+                                solverChoice.canopyTurb, static_cast<Real>(dt));
         }
 
         // *************************************************************************************

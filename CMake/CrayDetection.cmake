@@ -195,54 +195,51 @@ if(ERF_ENABLE_CUDA)
         message(DEBUG "CMAKE_CUDA_FLAGS: ${CMAKE_CUDA_FLAGS}")
     endif()
     
-    # Detect AMReX CUDA architecture
+    # Detect CUDA architecture. The result goes into the standard
+    # CMAKE_CUDA_ARCHITECTURES cache variable (AMReX deprecated AMReX_CUDA_ARCH
+    # for CMake builds). This must happen before enable_language(CUDA).
     message(DEBUG "Detecting CUDA architecture")
-    
-    if(AMReX_CUDA_ARCH)
-        message(VERBOSE "AMReX_CUDA_ARCH: ${AMReX_CUDA_ARCH} (user specified)")
-        
-    elseif(DEFINED ENV{AMREX_CUDA_ARCH})
-        set(AMReX_CUDA_ARCH "$ENV{AMREX_CUDA_ARCH}" CACHE STRING "CUDA arch from AMREX_CUDA_ARCH")
-        message(VERBOSE "AMReX_CUDA_ARCH: $ENV{AMREX_CUDA_ARCH} (from environment)")
-        
-    elseif(DEFINED ENV{CMAKE_CUDA_ARCH})
-        set(ENV_CUDA_ARCH "$ENV{CMAKE_CUDA_ARCH}")
-        message(DEBUG "Found CMAKE_CUDA_ARCH: ${ENV_CUDA_ARCH}")
-        
-        # Convert to AMReX format
-        if(ENV_CUDA_ARCH MATCHES "^[0-9][0-9]$")
-            string(SUBSTRING "${ENV_CUDA_ARCH}" 0 1 MAJOR)
-            string(SUBSTRING "${ENV_CUDA_ARCH}" 1 1 MINOR)
-            set(DETECTED_CUDA_ARCH "${MAJOR}.${MINOR}")
-            message(TRACE "Converted ${ENV_CUDA_ARCH} -> ${DETECTED_CUDA_ARCH}")
-        else()
-            set(DETECTED_CUDA_ARCH "${ENV_CUDA_ARCH}")
-        endif()
-        
-        set(AMReX_CUDA_ARCH "${DETECTED_CUDA_ARCH}" CACHE STRING "CUDA arch from CMAKE_CUDA_ARCH")
-        message(VERBOSE "AMReX_CUDA_ARCH: ${DETECTED_CUDA_ARCH} (from CMAKE_CUDA_ARCH)")
-        
-    elseif(DEFINED ENV{CRAY_ACCEL_TARGET})
-        set(CRAY_ACCEL_TARGET "$ENV{CRAY_ACCEL_TARGET}")
-        message(VERBOSE "CRAY_ACCEL_TARGET: ${CRAY_ACCEL_TARGET}")
-        
-        if(CRAY_ACCEL_TARGET STREQUAL "nvidia70")
-            set(AMReX_CUDA_ARCH "7.0" CACHE STRING "CUDA arch from CRAY_ACCEL_TARGET")
-            message(VERBOSE "AMReX_CUDA_ARCH: 7.0 (Tesla V100)")
-        elseif(CRAY_ACCEL_TARGET STREQUAL "nvidia80")
-            set(AMReX_CUDA_ARCH "8.0" CACHE STRING "CUDA arch from CRAY_ACCEL_TARGET")
-            message(VERBOSE "AMReX_CUDA_ARCH: 8.0 (A100)")
-        elseif(CRAY_ACCEL_TARGET STREQUAL "nvidia90")
-            set(AMReX_CUDA_ARCH "9.0" CACHE STRING "CUDA arch from CRAY_ACCEL_TARGET")
-            message(VERBOSE "AMReX_CUDA_ARCH: 9.0 (H100)")
-        else()
-            message(WARNING "Unknown CRAY_ACCEL_TARGET: ${CRAY_ACCEL_TARGET}")
-        endif()
+
+    if(DEFINED CMAKE_CUDA_ARCHITECTURES)
+        message(VERBOSE "CMAKE_CUDA_ARCHITECTURES: ${CMAKE_CUDA_ARCHITECTURES} (user specified)")
+
+    elseif(DEFINED AMReX_CUDA_ARCH OR DEFINED ENV{AMREX_CUDA_ARCH} OR DEFINED ENV{CUDAARCHS})
+        # Explicit user choice; AMReX resolves these itself
+        message(VERBOSE "CUDA architecture given by AMReX_CUDA_ARCH, AMREX_CUDA_ARCH or CUDAARCHS")
+
     else()
-        message(WARNING "AMReX_CUDA_ARCH not detected")
-        message(STATUS "  For Perlmutter: module load gpu")
-        message(STATUS "  Or: export CMAKE_CUDA_ARCH=80")
-        message(STATUS "  Or: -DAMReX_CUDA_ARCH=8.0")
+        set(DETECTED_CUDA_ARCH "")
+        if(DEFINED ENV{CMAKE_CUDA_ARCH})
+            # Accept both "80" and "8.0"
+            string(REPLACE "." "" DETECTED_CUDA_ARCH "$ENV{CMAKE_CUDA_ARCH}")
+            message(VERBOSE "CUDA architecture ${DETECTED_CUDA_ARCH} (from CMAKE_CUDA_ARCH)")
+
+        elseif(DEFINED ENV{CRAY_ACCEL_TARGET})
+            set(CRAY_ACCEL_TARGET "$ENV{CRAY_ACCEL_TARGET}")
+            message(VERBOSE "CRAY_ACCEL_TARGET: ${CRAY_ACCEL_TARGET}")
+
+            if(CRAY_ACCEL_TARGET STREQUAL "nvidia70")
+                set(DETECTED_CUDA_ARCH "70")
+                message(VERBOSE "CUDA architecture 70 (Tesla V100)")
+            elseif(CRAY_ACCEL_TARGET STREQUAL "nvidia80")
+                set(DETECTED_CUDA_ARCH "80")
+                message(VERBOSE "CUDA architecture 80 (A100)")
+            elseif(CRAY_ACCEL_TARGET STREQUAL "nvidia90")
+                set(DETECTED_CUDA_ARCH "90")
+                message(VERBOSE "CUDA architecture 90 (H100)")
+            else()
+                message(WARNING "Unknown CRAY_ACCEL_TARGET: ${CRAY_ACCEL_TARGET}")
+            endif()
+        endif()
+
+        if(DETECTED_CUDA_ARCH)
+            set(CMAKE_CUDA_ARCHITECTURES "${DETECTED_CUDA_ARCH}" CACHE STRING
+                "CUDA architectures (auto-detected by ERF)")
+        else()
+            message(WARNING "CUDA architecture not detected; AMReX will default to 'native'")
+            message(STATUS "  For Perlmutter: module load gpu")
+            message(STATUS "  Or: -DCMAKE_CUDA_ARCHITECTURES=80")
+        endif()
     endif()
 endif()
 
@@ -282,7 +279,7 @@ if(AMReX_GPU_BACKEND MATCHES "HIP" OR ERF_ENABLE_HIP)
 endif()
 
 # Kokkos Architecture Detection (for EKAT physics)
-if(ERF_ENABLE_RRTMGP OR ERF_ENABLE_EAMXX_SHOC OR ERF_ENABLE_P3)
+if(ERF_ENABLE_RRTMGP OR ERF_ENABLE_EAMXX_SHOC)
     message(VERBOSE "EKAT-based physics enabled, checking Kokkos architecture")
     
     set(KOKKOS_ARCH_SET FALSE)
@@ -458,14 +455,14 @@ else()
 endif()
 
 # E3SM Cloned Check
-if(ERF_ENABLE_EAMXX_SHOC OR ERF_ENABLE_P3)
+if(ERF_ENABLE_EAMXX_SHOC)
     message(VERBOSE "Checking EAMxx files from E3SM")
 
     set(E3SM_EXPECTED_PATH "${PROJECT_SOURCE_DIR}/external/E3SM")
 
     if(NOT EXISTS "${PROJECT_SOURCE_DIR}/external/E3SM/components/eamxx/src/physics")
         message(FATAL_ERROR
-            "E3SM provides eamxx required for SHOC/P3 but not found.\n"
+            "E3SM provides eamxx required for SHOC but not found.\n"
             "\n"
             "This requires specific EAMxx physics source files from E3SM at commit 2eb52d9.\n"
             "\n"
@@ -476,7 +473,7 @@ if(ERF_ENABLE_EAMXX_SHOC OR ERF_ENABLE_P3)
             "  ln -s /path/to/your/E3SM ${PROJECT_SOURCE_DIR}/external/E3SM\n"
             "\n"
             "Or disable features:\n"
-            "  cmake -DERF_ENABLE_EAMXX_SHOC=OFF -DERF_ENABLE_P3=OFF ..\n")
+            "  cmake -DERF_ENABLE_EAMXX_SHOC=OFF ..\n")
     endif()
 else()
     message(DEBUG "EKAT physics not enabled, skipping E3SM check")
@@ -496,7 +493,7 @@ message(DEBUG "  MPICH_GPU_SUPPORT_ENABLED: $ENV{MPICH_GPU_SUPPORT_ENABLED}")
 # Fix 1: CUDA + EKAT -> nvcc_wrapper complications
 # ==============================================================================
 
-if(ERF_ENABLE_CUDA AND (ERF_ENABLE_RRTMGP OR ERF_ENABLE_EAMXX_SHOC OR ERF_ENABLE_P3))
+if(ERF_ENABLE_CUDA AND (ERF_ENABLE_RRTMGP OR ERF_ENABLE_EAMXX_SHOC))
     message(STATUS "Applying Fix 1: CUDA+EKAT nvcc_wrapper")
 
     message(DEBUG "Problem: nvcc_wrapper doesn't inherit Cray include paths")
@@ -531,7 +528,7 @@ endif()
 # Fix 2: FCOMPARE + Cray + EKAT/Kokkos -> mpi_gnu_123 not found
 # ==============================================================================
 
-if(ERF_ENABLE_FCOMPARE AND (ERF_ENABLE_RRTMGP OR ERF_ENABLE_EAMXX_SHOC OR ERF_ENABLE_P3))
+if(ERF_ENABLE_FCOMPARE AND (ERF_ENABLE_RRTMGP OR ERF_ENABLE_EAMXX_SHOC))
     message(STATUS "Applying Fix 2: fcompare linker with EKAT")
 
     message(DEBUG "Problem: --as-needed drops required MPI libs when EKAT is enabled")
@@ -564,7 +561,7 @@ if(ERF_ENABLE_FCOMPARE AND (ERF_ENABLE_RRTMGP OR ERF_ENABLE_EAMXX_SHOC OR ERF_EN
 
                 if(OTHER_RESULT EQUAL 0 AND NOT "${OTHER_LIBS}" STREQUAL "${CRAY_LIBS_RAW}")
                     message(STATUS "${COMPILER_NAME} compiler libs differ from CXX (using CXX libs only)")
-            	    message(VERBOSE "${COMPILER_NAME} compiler returns different libs than CXX:\n  CXX: ${CRAY_LIBS_RAW}\n  ${COMPILER_NAME}: ${OTHER_LIBS}\n  Using only CXX libs - build may fail if language-specific libs needed")
+                    message(VERBOSE "${COMPILER_NAME} compiler returns different libs than CXX:\n  CXX: ${CRAY_LIBS_RAW}\n  ${COMPILER_NAME}: ${OTHER_LIBS}\n  Using only CXX libs - build may fail if language-specific libs needed")
                 endif()
             endif()
         endforeach()
@@ -574,13 +571,13 @@ if(ERF_ENABLE_FCOMPARE AND (ERF_ENABLE_RRTMGP OR ERF_ENABLE_EAMXX_SHOC OR ERF_EN
         string(REGEX REPLACE ",--no-as-needed" "" CRAY_LIBS_CLEAN "${CRAY_LIBS_CLEAN}")
         string(REGEX REPLACE ",-l" " -l" CRAY_LIBS_CLEAN "${CRAY_LIBS_CLEAN}")
 
-	# Strip GPU-related flags that Kokkos/AMReX already handle
-	string(REGEX REPLACE "--offload-arch=[^ ]* *" "" CRAY_LIBS_CLEAN "${CRAY_LIBS_CLEAN}")
-	string(REGEX REPLACE "--hip-link *" "" CRAY_LIBS_CLEAN "${CRAY_LIBS_CLEAN}")
-	string(REGEX REPLACE "-fgpu-rdc *" "" CRAY_LIBS_CLEAN "${CRAY_LIBS_CLEAN}")
-	string(REGEX REPLACE "-xhip *" "" CRAY_LIBS_CLEAN "${CRAY_LIBS_CLEAN}")
+        # Strip GPU-related flags that Kokkos/AMReX already handle
+        string(REGEX REPLACE "--offload-arch=[^ ]* *" "" CRAY_LIBS_CLEAN "${CRAY_LIBS_CLEAN}")
+        string(REGEX REPLACE "--hip-link *" "" CRAY_LIBS_CLEAN "${CRAY_LIBS_CLEAN}")
+        string(REGEX REPLACE "-fgpu-rdc *" "" CRAY_LIBS_CLEAN "${CRAY_LIBS_CLEAN}")
+        string(REGEX REPLACE "-xhip *" "" CRAY_LIBS_CLEAN "${CRAY_LIBS_CLEAN}")
 
-	message(VERBOSE "Adding: -Wl,--no-as-needed + cleaned libs")
+        message(VERBOSE "Adding: -Wl,--no-as-needed + cleaned libs")
         message(DEBUG "Cleaned libs: ${CRAY_LIBS_CLEAN}")
 
         # Check if Fix 2 already applied
@@ -892,12 +889,12 @@ set(FIX56_ACTIVE OFF)
 set(FIX7_ACTIVE OFF)
 
 # Fix 1: CUDA + EKAT
-if(ERF_ENABLE_CUDA AND (ERF_ENABLE_RRTMGP OR ERF_ENABLE_EAMXX_SHOC OR ERF_ENABLE_P3) AND CRAY_CUDA_FLAGS)
+if(ERF_ENABLE_CUDA AND (ERF_ENABLE_RRTMGP OR ERF_ENABLE_EAMXX_SHOC) AND CRAY_CUDA_FLAGS)
     set(FIX1_ACTIVE ON)
 endif()
 
 # Fix 2: fcompare + EKAT
-if(ERF_ENABLE_FCOMPARE AND (ERF_ENABLE_RRTMGP OR ERF_ENABLE_EAMXX_SHOC OR ERF_ENABLE_P3) AND CRAY_LIBS_CLEAN)
+if(ERF_ENABLE_FCOMPARE AND (ERF_ENABLE_RRTMGP OR ERF_ENABLE_EAMXX_SHOC) AND CRAY_LIBS_CLEAN)
     set(FIX2_ACTIVE ON)
 endif()
 
@@ -1067,10 +1064,10 @@ set(CMAKE_CXX_COMPILER_VERSION \"${CMAKE_CXX_COMPILER_VERSION}\" CACHE STRING \"
 ")
 
 # GPU architectures
-if(ERF_ENABLE_CUDA AND AMReX_CUDA_ARCH)
+if(ERF_ENABLE_CUDA AND CMAKE_CUDA_ARCHITECTURES)
     file(APPEND ${CRAY_CONFIG_FILE} "
 # CUDA Configuration
-set(AMReX_CUDA_ARCH \"${AMReX_CUDA_ARCH}\" CACHE STRING \"Auto-detected\")
+set(CMAKE_CUDA_ARCHITECTURES \"${CMAKE_CUDA_ARCHITECTURES}\" CACHE STRING \"Auto-detected\")
 ")
 endif()
 

@@ -142,6 +142,10 @@ file **Exec/ERF_Prob.cpp** must still be present for the build.
     A file may be supplied for each level -- ``erf.nc_init_file_0``,
     ``erf.nc_init_file_1``, and so on -- but only level 0 is required to have one;
     see :ref:`sec:nested-wrfinput` below.
+    Each MPI rank reads from the wrfinput file only the part of each field that its
+    own grids cover, so no rank ever holds a whole field.  To keep a large job from
+    having every rank open the file at once, at most ``erf.wrfinput_max_readers``
+    ranks (default 256; a value of zero or less removes the limit) read at the same time.
 
 * **erf.init_type = Metgrid**
 
@@ -153,6 +157,8 @@ file **Exec/ERF_Prob.cpp** must still be present for the build.
     System (WPS) listed chronologically starting with the earliest
     timestamp. A minimum of two files are required to derive lateral
     boundary conditions.
+  - With ``erf.land_surface_model = SLM``, SLM's initial land state is also
+    built from each level's first file; see :ref:`sec:slm-metgrid-init`.
 
 * **erf.init_type = NCFile**
 
@@ -165,6 +171,40 @@ file **Exec/ERF_Prob.cpp** must still be present for the build.
     Variable names include ``RHO``, ``U``, ``V``, ``W``, ``T``, and ``QV``.
     Optional HSE variables include ``RHO_HSE``, ``T_HSE``, and ``P_HSE``; the base state will be
     calculated if it is not specified.
+
+.. _subsec:wrfinput-vertical-grid:
+
+The vertical grid built from a wrfinput file
+--------------------------------------------
+
+With ``erf.avg_grid_faces_to_nodes = false`` (the default) ERF does not adopt the wrfinput
+mesh; it builds its own staggered z-levels and remaps the state onto them.  The vertical
+distribution of those levels is chosen by ``erf.wrfinput_zlevels_from_file``.
+
+With the default ``erf.wrfinput_zlevels_from_file = true`` the levels come from the file's
+own **domain-mean layer-thickness profile**.  A wrfinput column's layer thicknesses vary by
+tens of percent from column to column aloft, because the WRF coordinate is pressure-based,
+and that horizontal raggedness is exactly what ERF does not want in a mesh; but the mean
+over the domain is smooth in the vertical index, so averaging keeps the file's vertical
+*distribution* while discarding its horizontal *raggedness*.  The mean profile is then
+closed onto ``z_top`` by a weight that is unity at the surface and grows linearly with
+height, so the near-surface layers are the file's own thicknesses and the difference
+between ``z_top`` and the file's mean column depth is taken up aloft.  ERF reports the
+first and last layer thickness it built, how much stretching went in aloft, and the range
+of the layer-to-layer stretch ratio.
+
+With ``erf.wrfinput_zlevels_from_file = false`` ERF instead uses a single **geometric
+stretch**: the first layer is the thickest first layer anywhere in the file, and the
+stretch factor is found by a Newton solve on the geometric sum so that the column reaches
+``z_top``.  This is the construction ERF used before, and it is the natural one when the
+first layer thickness and the domain height are the knowns rather than a file's profile;
+``erf_grid_utils::geometric_stretch`` in ``Source/Utils/ERF_GridUtils.H`` provides it as a
+standalone host/device routine for that case.  Note that a wrfinput first layer is
+deliberately thicker than the layers just above it, so anchoring to it and only growing
+makes the layers through the boundary layer substantially thicker than the file's.
+
+A level whose grids do not reach the top of the domain has no mean profile over part of its
+column, and falls back to the geometric construction with a message saying so.
 
 .. _sec:nested-wrfinput:
 
@@ -210,13 +250,15 @@ not have, and ERF does so as it reads each file:
    not interpolated from the coarse level.  See `The base state at each level`_ below.
 
 With the default ``erf.avg_grid_faces_to_nodes = false``, ERF does not use the refined
-WRF heights as its mesh; it reconstructs the nodal heights of the first two layers, takes
-the first-layer thickness from them, and solves for the stretching factor that fills the
-domain with this level's (now :math:`r_z` times as many) layers.  The fine level thus gets
-a stretched grid whose first layer is :math:`1/r_z` as thick as the parent's, and the
-state is remapped onto it from the refined WRF heights.  With
-``erf.avg_grid_faces_to_nodes = true`` the mesh is the refined WRF mesh itself, so every
-:math:`r_z`-th fine interface coincides exactly with a WRF interface.
+WRF heights as its mesh; it builds this level's own z-levels with this level's (now
+:math:`r_z` times as many) layers, as described in
+:ref:`subsec:wrfinput-vertical-grid`, and remaps the state onto them from the refined WRF
+heights.  The profile is the mean over this level's own region, which for a nest is not
+the whole domain; a nest that stops below the domain top has no profile over the upper
+part of its column and falls back to the geometric construction, whose first layer is
+:math:`1/r_z` as thick as the parent's.  With ``erf.avg_grid_faces_to_nodes = true`` the
+mesh is the refined WRF mesh itself, so every :math:`r_z`-th fine interface coincides
+exactly with a WRF interface.
 
 Vertical refinement composes with everything else described here: the nest may still be
 given its own file or be interpolated from its parent, and it may still stop below the
@@ -254,6 +296,40 @@ If no file is given for the finer level, omit ``erf.nc_init_file_1`` and use a r
 indicator alone.  The finer level's terrain and state are then interpolated from its
 parent, and its base state is built as described below.  This works whether or not the
 refined region reaches the domain top.
+
+.. _subsec:wrflow-per-level:
+
+Sea surface and skin temperatures at each level
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+When ``erf.nc_low_file`` names a wrflowinp file, level 0 reads its sea surface temperature
+(SST) from it at each of the file's times, and the surface layer interpolates linearly in
+time between the two slices that bracket the current time.  Over water the skin
+temperature (TSK) takes the SST from the file, so it is interpolated in time the same way.
+
+A finer level may be given a wrflowinp file of its own, as WRF does for a nest run with
+``sst_update = 1``::
+
+          erf.nc_low_file   = "wrflowinp_d01"
+          erf.nc_low_file_1 = "wrflowinp_d02"
+
+The level then reads its SST from that file, on the cells its own wrfinput file covers,
+and is interpolated in time exactly as level 0 is.  This requires:
+
+-  ``erf.nc_low_file`` for level 0;
+-  ``erf.init_type = WRFInput`` and a single ``erf.nc_init_file_<lev>`` for the level,
+   whose position and size the wrflowinp file must match;
+-  the same times as level 0's file -- the same start, interval and number of times --
+   since every level is interpolated in time between the same slices.
+
+ERF aborts with a message if any of these does not hold.
+
+A finer level that reads its own wrfinput file but is given no wrflowinp file prints a
+warning, and from the start of the run takes **all** of its SST and TSK time slices,
+including the first, by interpolation from its parent, which follows level 0's wrflowinp
+file.  The SST and TSK the level read from its own wrfinput file are not used; the rest of
+that file is.  A level with no wrfinput file of its own always takes its SST and TSK from
+its parent.
 
 The base state at each level
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~

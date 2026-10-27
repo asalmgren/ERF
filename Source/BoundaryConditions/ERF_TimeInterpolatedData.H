@@ -5,65 +5,87 @@
 #include <AMReX_Vector.H>
 #include <AMReX_REAL.H>
 
+#include <utility>
+
 struct TimeInterpolatedData {
     /**
      * Construct empty time-interpolated data storage.
      */
-    TimeInterpolatedData() = default;
+    TimeInterpolatedData () = default;
 
     /**
      * Construct storage associated with a time.
      *
      * @param[in] time time associated with the data
      */
-    TimeInterpolatedData(double time) : m_time(time) {}
+    TimeInterpolatedData (double time) : m_time(time) {}
 
     /**
      * Destroy owned data and clear internal storage.
      */
-    ~TimeInterpolatedData() {
+    ~TimeInterpolatedData () {
         clear();
     }
 
     /**
-     * Default move constructor.
-     */
-    TimeInterpolatedData(TimeInterpolatedData&&)  noexcept = default;
-
-    /**
-     * Default move-assignment operator.
+     * Move constructor: takes over the source's data and ownership, leaving it empty.
      *
      * @param[in] other source object
      */
-    TimeInterpolatedData& operator=(TimeInterpolatedData&& other)  noexcept = default;
+    TimeInterpolatedData (TimeInterpolatedData&& other) noexcept
+        : m_data(std::move(other.m_data)),
+          m_owns_data(std::move(other.m_owns_data)),
+          m_time(other.m_time)
+    {
+        other.m_data.clear();
+        other.m_owns_data.clear();
+    }
+
+    /**
+     * Move-assignment operator: frees the data this object owns, then takes over the
+     * source's data and ownership, leaving it empty.
+     *
+     * @param[in] other source object
+     */
+    TimeInterpolatedData& operator= (TimeInterpolatedData&& other) noexcept {
+        if (this != &other) {
+            clear();
+            m_data      = std::move(other.m_data);
+            m_owns_data = std::move(other.m_owns_data);
+            m_time      = other.m_time;
+            other.m_data.clear();
+            other.m_owns_data.clear();
+        }
+        return *this;
+    }
 
     /**
      * Deleted copy constructor.
      *
      * @param[in] other source object
      */
-    TimeInterpolatedData(const TimeInterpolatedData& other) = delete;
+    TimeInterpolatedData (const TimeInterpolatedData& other) = delete;
 
     /**
      * Deleted copy-assignment operator.
      *
      * @param[in] other source object
      */
-    TimeInterpolatedData& operator=(const TimeInterpolatedData& other) = delete;
+    TimeInterpolatedData& operator= (const TimeInterpolatedData& other) = delete;
 
     /**
      * Set the time associated with the data.
      *
      * @param[in] time time associated with the data
      */
-    void set_time(double time) {
+    void set_time (double time) {
         m_time = time;
     }
 
     /**
      * Return the time associated with the data.
      */
-    [[nodiscard]] double get_time() const { return m_time; }
+    [[nodiscard]] double get_time () const { return m_time; }
 
     /**
      * Add a MultiFab pointer to the managed list.
@@ -71,7 +93,7 @@ struct TimeInterpolatedData {
      * @param[in] var_data MultiFab pointer to store
      * @param[in] own_data whether this object owns and deletes var_data
      */
-    void add_var(amrex::MultiFab* var_data, int own_data) {
+    void add_var (amrex::MultiFab* var_data, int own_data) {
         m_data.push_back(var_data);
         m_owns_data.push_back(own_data);
     }
@@ -81,19 +103,19 @@ struct TimeInterpolatedData {
      *
      * @param[in] var_idx index of the stored MultiFab
      */
-    amrex::MultiFab& get_var(int var_idx) {
+    amrex::MultiFab& get_var (int var_idx) {
         return *m_data[var_idx];
     }
 
     /**
      * Return the number of stored MultiFabs.
      */
-    int num_vars() { return m_data.size(); }
+    int num_vars () { return m_data.size(); }
 
     /**
      * Clear stored data, deleting entries owned by this object.
      */
-    void clear() {
+    void clear () {
         // clear all data owned by this object
         for (int i = 0; i < num_vars(); ++i) {
             if (m_owns_data[i] == 1) {
@@ -111,7 +133,7 @@ struct TimeInterpolatedData {
 private:
     amrex::Vector<amrex::MultiFab*> m_data;
     amrex::Vector<int> m_owns_data;
-    double m_time;
+    double m_time = 0.0;
 };
 
 #endif

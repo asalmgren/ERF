@@ -7,11 +7,13 @@
 #include <ERF_EOS.H>
 #include <ERF_TerrainMetrics.H>
 #include <ERF_Diffusion.H>
+#include <ERF_NativeScalarDiffusion.H>
 #include <ERF_TileNoZ.H>
 #include <ERF_Utils.H>
 #include <ERF_EBRedistribute.H>
 #include <ERF_PlaneAverage.H>
 #include <ERF_CanopyBiophysics.H>
+#include <ERF_SBMOwnership.H>
 
 using namespace amrex;
 
@@ -107,7 +109,7 @@ void ERF::advance_dycore (int level,
     const bool use_lsf = solverChoice.large_scale_forcing;
     AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
         solverChoice.moisture_type != MoistureType::SBM || (!use_lsf && !use_nudging),
-        "SBM zero-transport fixture does not support large-scale subsidence or sounding nudging");
+        "SBM M3 does not support large-scale subsidence or sounding nudging");
 
     const BoxArray& ba            = state_old[IntVars::cons].boxArray();
     const BoxArray& ba_z          = zvel_old.boxArray();
@@ -117,7 +119,7 @@ void ERF::advance_dycore (int level,
 
     MultiFab    S_prim  (ba  , dm, num_prim,          state_old[IntVars::cons].nGrowVect());
     MultiFab  pi_stage  (ba  , dm,        1,          1);
-    MultiFab fast_coeffs(ba_z, dm,        5,          0);
+    MultiFab fast_coeffs(ba_z, dm,        6,          0);
 
     MultiFab* eddyDiffs = eddyDiffs_lev[level].get();
     MultiFab* SmnSmn    = SmnSmn_lev[level].get();
@@ -270,22 +272,26 @@ void ERF::advance_dycore (int level,
     if (use_lsf) {
         lsf_data[level]->setVal(0.0);
 
+        // The forcing profiles interpolated to this level's cell centres, so that index k
+        // below is this level's cell k
+        const LargeScaleForcingData& lsf_lev = lsf_at_level(level);
+
         int itime_curr = 0;
         int itime_next = 0;
         amrex::Real coeff_curr = 1.0;
         amrex::Real coeff_next = 0.0;
 
-        lsf.get_forcing_time_coeffs(old_time, itime_curr, itime_next, coeff_curr, coeff_next);
+        lsf_lev.get_forcing_time_coeffs(old_time, itime_curr, itime_next, coeff_curr, coeff_next);
 
         // ttend, qtend, wsub = lsf
         // ug0, vg0 = lsf - avg u,v
 
-        const Real* theta_lsf_n   = lsf.t_int_lsf_d[itime_curr].dataPtr();
-        const Real* theta_lsf_np1 = lsf.t_int_lsf_d[itime_next].dataPtr();
-        const Real* qv_lsf_n   = lsf.q_int_lsf_d[itime_curr].dataPtr();
-        const Real* qv_lsf_np1 = lsf.q_int_lsf_d[itime_next].dataPtr();
-        const Real* w_lsf_n   = lsf.w_int_lsf_d[itime_curr].dataPtr();
-        const Real* w_lsf_np1 = lsf.w_int_lsf_d[itime_next].dataPtr();
+        const Real* theta_lsf_n   = lsf_lev.t_int_lsf_d[itime_curr].dataPtr();
+        const Real* theta_lsf_np1 = lsf_lev.t_int_lsf_d[itime_next].dataPtr();
+        const Real* qv_lsf_n   = lsf_lev.q_int_lsf_d[itime_curr].dataPtr();
+        const Real* qv_lsf_np1 = lsf_lev.q_int_lsf_d[itime_next].dataPtr();
+        const Real* w_lsf_n   = lsf_lev.w_int_lsf_d[itime_curr].dataPtr();
+        const Real* w_lsf_np1 = lsf_lev.w_int_lsf_d[itime_next].dataPtr();
 
 #ifdef _OPENMP
 #pragma omp parallel if (Gpu::notInLaunchRegion())
@@ -362,30 +368,34 @@ void ERF::advance_dycore (int level,
     if (use_nudging) {
         nudge_data[level]->setVal(0.0);
 
+        // The sounding sampled at this level's cell centres, so that index k below is this
+        // level's cell k (the level-0 profile indexed by a fine k is the wrong height)
+        const InputSoundingData& snd = sounding_at_level(level);
+
         int itime_n    = 0;
         int itime_np1  = 0;
         Real coeff_n   = Real(1.0);
         Real coeff_np1 = Real(0.0);
-        Real tau_inv = Real(1.0) / input_sounding_data.tau_nudging;
+        Real tau_inv = Real(1.0) / snd.tau_nudging;
 
-        int n_sounding_times = input_sounding_data.input_sounding_time.size();
+        int n_sounding_times = snd.input_sounding_time.size();
 
         for (int nt = 1; nt < n_sounding_times; nt++) {
-            if (old_time > input_sounding_data.input_sounding_time[nt]) itime_n = nt;
+            if (old_time > snd.input_sounding_time[nt]) itime_n = nt;
         }
         if (itime_n == n_sounding_times-1) {
             itime_np1 = itime_n;
         } else {
             itime_np1 = itime_n+1;
-            coeff_np1 = (old_time                                           - input_sounding_data.input_sounding_time[itime_n]) /
-                        (input_sounding_data.input_sounding_time[itime_np1] - input_sounding_data.input_sounding_time[itime_n]);
+            coeff_np1 = (old_time                                           - snd.input_sounding_time[itime_n]) /
+                        (snd.input_sounding_time[itime_np1] - snd.input_sounding_time[itime_n]);
             coeff_n   = Real(1.0) - coeff_np1;
         }
 
-        const Real* theta_inp_sound_n   = input_sounding_data.theta_inp_sound_d[itime_n].dataPtr() + 1;
-        const Real* theta_inp_sound_np1 = input_sounding_data.theta_inp_sound_d[itime_np1].dataPtr() + 1;
-        const Real* qv_inp_sound_n   = input_sounding_data.qv_inp_sound_d[itime_n].dataPtr() + 1;
-        const Real* qv_inp_sound_np1 = input_sounding_data.qv_inp_sound_d[itime_np1].dataPtr() + 1;
+        const Real* theta_inp_sound_n   = snd.theta_inp_sound_d[itime_n].dataPtr() + 1;
+        const Real* theta_inp_sound_np1 = snd.theta_inp_sound_d[itime_np1].dataPtr() + 1;
+        const Real* qv_inp_sound_n   = snd.qv_inp_sound_d[itime_n].dataPtr() + 1;
+        const Real* qv_inp_sound_np1 = snd.qv_inp_sound_d[itime_np1].dataPtr() + 1;
 
         const int n  = RhoTheta_comp;
         const int nq  = RhoQ1_comp;
@@ -452,25 +462,26 @@ void ERF::advance_dycore (int level,
                 Real uv_coeff_n = coeff_n;
                 Real uv_coeff_np1 = coeff_np1;
                 Real tau = tau_inv;
-                Real* u_nudge_n, *u_nudge_np1, *v_nudge_n, *v_nudge_np1;
+                const Real *u_nudge_n, *u_nudge_np1, *v_nudge_n, *v_nudge_np1;
                 if (!use_lsf)
                 {
-                    u_nudge_n = input_sounding_data.U_inp_sound_d[itime_n].dataPtr() + 1;
-                    u_nudge_np1 = input_sounding_data.U_inp_sound_d[itime_np1].dataPtr() + 1;
-                    v_nudge_n  = input_sounding_data.V_inp_sound_d[itime_n].dataPtr() + 1;
-                    v_nudge_np1 = input_sounding_data.V_inp_sound_d[itime_np1].dataPtr() + 1;
+                    u_nudge_n = snd.U_inp_sound_d[itime_n].dataPtr() + 1;
+                    u_nudge_np1 = snd.U_inp_sound_d[itime_np1].dataPtr() + 1;
+                    v_nudge_n  = snd.V_inp_sound_d[itime_n].dataPtr() + 1;
+                    v_nudge_np1 = snd.V_inp_sound_d[itime_np1].dataPtr() + 1;
                 } else {
                     int itime_curr = 0;
                     int itime_next = 0;
                     uv_coeff_n = 1.0;
                     uv_coeff_np1 = 0.0;
-                    tau = 1.0 / lsf.tau_lsf; // only applies to u,v LSF nudging
+                    const LargeScaleForcingData& lsf_uv = lsf_at_level(level);
+                    tau = 1.0 / lsf_uv.tau_lsf; // only applies to u,v LSF nudging
 
-                    lsf.get_forcing_time_coeffs(old_time, itime_curr, itime_next, uv_coeff_n, uv_coeff_np1);
-                    u_nudge_n   = lsf.u_int_lsf_d[itime_curr].dataPtr();
-                    u_nudge_np1 = lsf.u_int_lsf_d[itime_next].dataPtr();
-                    v_nudge_n   = lsf.v_int_lsf_d[itime_curr].dataPtr();
-                    v_nudge_np1 = lsf.v_int_lsf_d[itime_next].dataPtr();
+                    lsf_uv.get_forcing_time_coeffs(old_time, itime_curr, itime_next, uv_coeff_n, uv_coeff_np1);
+                    u_nudge_n   = lsf_uv.u_int_lsf_d[itime_curr].dataPtr();
+                    u_nudge_np1 = lsf_uv.u_int_lsf_d[itime_next].dataPtr();
+                    v_nudge_n   = lsf_uv.v_int_lsf_d[itime_curr].dataPtr();
+                    v_nudge_np1 = lsf_uv.v_int_lsf_d[itime_next].dataPtr();
                 }
 
                 ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
@@ -609,6 +620,7 @@ void ERF::advance_dycore (int level,
     MultiFab* Q1fx3 = SFS_q1fx3_lev[level].get();
     MultiFab* Q2fx3 = SFS_q2fx3_lev[level].get();
     MultiFab* Diss  = SFS_diss_lev[level].get();
+    MultiFab* mf_surface_fluxes = &mfvec_surface_fluxes[level];
 
     MultiFab* Hfx3_EB = nullptr;
     if (solverChoice.terrain_type == TerrainType::EB) {
@@ -645,7 +657,9 @@ void ERF::advance_dycore (int level,
                                   qheating_rates[level].get(),
                                   (solverChoice.terrain_type == TerrainType::ImmersedForcing ||
                                    solverChoice.buildings_type == BuildingsType::ImmersedForcing) ?
-                                      terrain_blanking[level].get() : nullptr);
+                                      terrain_blanking[level].get() : nullptr,
+                                  (solverChoice.do_forest_drag) ?
+                                      m_forest_drag[level]->get_drag_field() : nullptr);
 
         // Zero turbulent mixing in fully immersed cells
         MultiFab* terrain_blank = (solverChoice.terrain_type == TerrainType::ImmersedForcing ||
@@ -676,26 +690,26 @@ void ERF::advance_dycore (int level,
     if (solverChoice.custom_rhotheta_forcing) {
         prob->update_rhotheta_sources(old_time,
                                       rhotheta_src_ptr,
-                                      fine_geom, z_phys_cc[level]);
+                                      fine_geom, z_phys_cc[level], zlevels_stag[level]);
     }
 
     if (solverChoice.custom_moisture_forcing) {
         prob->update_rhoqt_sources(old_time,
                                    rhoqt_src_ptr,
-                                   fine_geom, z_phys_cc[level]);
+                                   fine_geom, z_phys_cc[level], zlevels_stag[level]);
     }
 
     if (solverChoice.custom_geostrophic_profile) {
         prob->update_geostrophic_profile(old_time,
                                    h_u_geos[level], d_u_geos[level],
                                    h_v_geos[level], d_v_geos[level],
-                                   fine_geom, z_phys_cc[level]);
+                                   fine_geom, z_phys_cc[level], zlevels_stag[level]);
     }
 
     if (solverChoice.custom_w_subsidence) {
         prob->update_w_subsidence(old_time,
                                   h_w_subsid[level], d_w_subsid[level],base_state[level],
-                                  fine_geom, z_phys_nd[level]);
+                                  fine_geom, z_phys_nd[level], zlevels_stag[level]);
     }
 
     // ***********************************************************************************************
@@ -706,10 +720,13 @@ void ERF::advance_dycore (int level,
     //
     // This is an optimization since we won't need more than one ghost
     // cell of momentum in the integrator if not using numerical diffusion
+    // or EB (the EB momentum fluxes and Omega read two cells outside the valid region)
     //
-    IntVect ngu = (!solverChoice.use_num_diff) ? IntVect(1,1,1) : xvel_old.nGrowVect();
-    IntVect ngv = (!solverChoice.use_num_diff) ? IntVect(1,1,1) : yvel_old.nGrowVect();
-    IntVect ngw = (!solverChoice.use_num_diff) ? IntVect(1,1,0) : zvel_old.nGrowVect();
+    const bool all_mom_ghosts = solverChoice.use_num_diff ||
+                                (solverChoice.terrain_type == TerrainType::EB);
+    IntVect ngu = (!all_mom_ghosts) ? IntVect(1,1,1) : xvel_old.nGrowVect();
+    IntVect ngv = (!all_mom_ghosts) ? IntVect(1,1,1) : yvel_old.nGrowVect();
+    IntVect ngw = (!all_mom_ghosts) ? IntVect(1,1,0) : zvel_old.nGrowVect();
 
     const MultiFab* c_vfrac = nullptr;
     if (solverChoice.terrain_type == TerrainType::EB) {

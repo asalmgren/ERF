@@ -23,14 +23,14 @@ namespace fs = std::filesystem;
  * @param[out] surface_state MultiFabs to be filled with interpolated surface data.
  */
 void
-ERF::FillSurfaceStateMultiFabs(const int lev,
-                               const std::string& filename,
-                               Vector<MultiFab>& surface_state)
+ERF::FillSurfaceStateMultiFabs (const int lev,
+                                const std::string& filename,
+                                Vector<MultiFab>& surface_state)
 {
        // Open the binary file in input mode
     std::ifstream infile(filename, std::ios::binary);
     if (!infile) {
-        std::cerr << "Error: Could not open file " << filename << std::endl;
+        Abort("Error: Could not open the surface data file " + filename);
     }
     Vector<Real> xvec_h, yvec_h, zvec_h;
     Vector<Real> sst_h, q_star_h, t_star_h, u_star_h, ls_mask_h;
@@ -43,6 +43,24 @@ ERF::FillSurfaceStateMultiFabs(const int lev,
     infile.read(reinterpret_cast<char*>(&ny), sizeof(int));
     infile.read(reinterpret_cast<char*>(&nz), sizeof(int));
     infile.read(reinterpret_cast<char*>(&ndata), sizeof(int));
+
+    // Everything below sizes arrays with these, so do not carry on with whatever
+    // was on the stack if the file was too short to hold them
+    if (!infile) {
+        Abort("Error: Could not read nx, ny, nz and ndata from the surface data file " + filename);
+    }
+
+    // The coordinate arrays are indexed up to n-1 and the data below up to nx*ny*nz; the
+    // land-sea mask is field 4 and the SST field 0, so there must be at least five fields
+    if (nx < 1 || ny < 1 || nz < 1) {
+        Abort("Error: the surface data file " + filename + " has nx = " + std::to_string(nx) +
+              ", ny = " + std::to_string(ny) + ", nz = " + std::to_string(nz) +
+              "; each must be at least 1");
+    }
+    if (ndata < 5) {
+        Abort("Error: the surface data file " + filename + " has ndata = " + std::to_string(ndata) +
+              "; at least 5 fields (SST, q*, T*, u*, land-sea mask) are needed");
+    }
 
     amrex::Gpu::DeviceVector<Real> xvec_d(nx*ny*nz), yvec_d(nx*ny*nz), zvec_d(nz);
     for(int i=0; i<nx; i++) {
@@ -66,12 +84,14 @@ ERF::FillSurfaceStateMultiFabs(const int lev,
          // Vector to store the data
 
     Vector<Real>* data_h = nullptr; // Declare pointer outside the loop
+    Vector<Real> unused_h;          // Fields past the fifth are read and discarded
 
     Real* xvec_d_ptr = xvec_d.data();
     Real* yvec_d_ptr = yvec_d.data();
 
-    Real dxvec = (xvec_h[nx-1]-xvec_h[0])/(nx-1);
-    Real dyvec = (yvec_h[ny-1]-yvec_h[0])/(ny-1);
+    // A single point in a direction has no spacing; the interpolation does not use it then
+    Real dxvec = (nx > 1) ? (xvec_h[nx-1]-xvec_h[0])/(nx-1) : Real(0);
+    Real dyvec = (ny > 1) ? (yvec_h[ny-1]-yvec_h[0])/(ny-1) : Real(0);
 
     // Read the file
     for(int idx=0; idx<ndata; idx++){
@@ -85,6 +105,9 @@ ERF::FillSurfaceStateMultiFabs(const int lev,
             data_h = &u_star_h;
         } else if(idx==4) {
             data_h = &ls_mask_h;
+        } else {
+            unused_h.clear();
+            data_h = &unused_h;
         }
         for(int k=0; k<nz; k++) {
             for(int j=0; j<ny; j++) {
@@ -99,6 +122,12 @@ ERF::FillSurfaceStateMultiFabs(const int lev,
         }
     }
 
+    if (!infile) {
+        Abort("Error: the surface data file " + filename + " ended before all of its " +
+              std::to_string(ndata) + " fields of " + std::to_string(nx) + " x " +
+              std::to_string(ny) + " x " + std::to_string(nz) + " values were read");
+    }
+
     infile.close();
 
     amrex::Gpu::DeviceVector<Real> ls_mask_d(nx*ny*nz), sst_d(nx*ny*nz);
@@ -109,8 +138,8 @@ ERF::FillSurfaceStateMultiFabs(const int lev,
     Real* ls_mask_d_ptr = ls_mask_d.data();
     Real* sst_d_ptr   = sst_d.data();
 
-    const auto prob_lo  = geom[lev].ProbLo();
-    const auto dx       = geom[lev].CellSize();
+    const auto prob_lo  = geom[lev].ProbLoArray();
+    const auto dx       = geom[lev].CellSizeArray();
 
     for (amrex::MFIter mfi(surface_state[lev]); mfi.isValid(); ++mfi) {
         const Box gbx = mfi.growntilebox();
@@ -154,10 +183,10 @@ ERF::FillSurfaceStateMultiFabs(const int lev,
  * @param[in] regrid_forces_file_read Flag indicating if a regrid requires a file read.
  */
 void
-ERF::SurfaceDataInterpolation(const int lev,
-                              const double time,
-                              amrex::Vector<std::unique_ptr<amrex::MultiFab>>& a_z_phys_nd,
-                              bool regrid_forces_file_read)
+ERF::SurfaceDataInterpolation (const int lev,
+                               const double time,
+                               amrex::Vector<std::unique_ptr<amrex::MultiFab>>& a_z_phys_nd,
+                               bool regrid_forces_file_read)
 {
 
     static amrex::Vector<double> next_read_forecast_time;

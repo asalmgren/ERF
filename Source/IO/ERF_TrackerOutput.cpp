@@ -11,7 +11,7 @@ namespace fs = std::filesystem;
 using namespace amrex;
 
 std::string
-ERF::MakeVTKFilename(int nstep) {
+ERF::MakeVTKFilename (int nstep) {
     // Ensure output directory exists
     const std::string dir = "Output_StormTracker";
     if (!fs::exists(dir)) {
@@ -24,7 +24,7 @@ ERF::MakeVTKFilename(int nstep) {
 }
 
 std::string
-ERF::MakeVTKFilename_TrackerCircle(int nstep) {
+ERF::MakeVTKFilename_TrackerCircle (int nstep) {
     // Ensure output directory exists
     const std::string dir = "Output_StormTracker/tracker_circle";
     if (!fs::exists(dir)) {
@@ -38,7 +38,7 @@ ERF::MakeVTKFilename_TrackerCircle(int nstep) {
 }
 
 std::string
-ERF::MakeVTKFilename_EyeTracker_xy(int nstep) {
+ERF::MakeVTKFilename_EyeTracker_xy (int nstep) {
     // Ensure output directory exists
     const std::string dir = "Output_StormTracker/xy";
     if (!fs::exists(dir)) {
@@ -52,7 +52,7 @@ ERF::MakeVTKFilename_EyeTracker_xy(int nstep) {
 }
 
 std::string
-ERF::MakeFilename_EyeTracker_latlon(int nstep) {
+ERF::MakeFilename_EyeTracker_latlon (int nstep) {
     // Ensure output directory exists
     const std::string dir = "Output_StormTracker/latlon";
     if (!fs::exists(dir)) {
@@ -66,7 +66,7 @@ ERF::MakeFilename_EyeTracker_latlon(int nstep) {
 }
 
 std::string
-ERF::MakeFilename_EyeTracker_maxvel(int nstep) {
+ERF::MakeFilename_EyeTracker_maxvel (int nstep) {
     // Ensure output directory exists
     const std::string dir = "Output_StormTracker/maxvel";
     if (!fs::exists(dir)) {
@@ -80,7 +80,7 @@ ERF::MakeFilename_EyeTracker_maxvel(int nstep) {
 }
 
 std::string
-ERF::MakeFilename_EyeTracker_minpressure(int nstep) {
+ERF::MakeFilename_EyeTracker_minpressure (int nstep) {
     // Ensure output directory exists
     const std::string dir = "Output_StormTracker/minpressure";
     if (!fs::exists(dir)) {
@@ -93,9 +93,23 @@ ERF::MakeFilename_EyeTracker_minpressure(int nstep) {
     return oss.str();
 }
 
+std::string
+ERF::MakeFilename_EyeTracker_surface_fluxes (int nstep) {
+    // Ensure output directory exists
+    const std::string dir = "Output_StormTracker/surface_fluxes";
+    if (!fs::exists(dir)) {
+        fs::create_directories(dir);
+    }
+
+    // Construct filename with zero-padded step
+    std::ostringstream oss;
+    oss << dir << "/surface_fluxes_" << std::setw(7) << std::setfill('0') << nstep << ".txt";
+    return oss.str();
+}
+
 void
-ERF::WriteVTKPolyline(const std::string& filename,
-                      Vector<std::array<Real, 2>>& points_xy)
+ERF::WriteVTKPolyline (const std::string& filename,
+                       const Vector<std::array<Real, 2>>& points_xy)
 {
     std::ofstream vtkfile(filename);
     if (!vtkfile.is_open()) {
@@ -113,10 +127,10 @@ ERF::WriteVTKPolyline(const std::string& filename,
         vtkfile.close();
         return;
     }
-    if (num_points < 2) {
-        points_xy.push_back(points_xy[0]);
-    }
-    num_points = points_xy.size();
+    // A VTK polyline needs at least two points; repeat a lone point in the
+    // file only, leaving the caller's track history unchanged
+    const int num_in = num_points;
+    num_points = std::max(num_in, 2);
 
     vtkfile << "# vtk DataFile Version three\n";
     vtkfile << "Storm Track\n";
@@ -125,7 +139,8 @@ ERF::WriteVTKPolyline(const std::string& filename,
 
     // Write points (Z=0 assumed)
     vtkfile << "POINTS " << num_points << " float\n";
-    for (const auto& pt : points_xy) {
+    for (int i = 0; i < num_points; ++i) {
+        const auto& pt = points_xy[std::min(i, num_in - 1)];
         vtkfile << pt[0] << " " << pt[1] << " " << 10000.0 << std::endl;
     }
 

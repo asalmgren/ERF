@@ -2,6 +2,7 @@
 #include "ERF_Constants.H"
 #include "ERF_TI_slow_headers.H"
 #include "ERF_SrcHeaders.H"
+#include "ERF_ImmersedWallStability.H"
 
 using namespace amrex;
 
@@ -19,11 +20,13 @@ using namespace amrex;
  * @param[in] tflux_in Surface heat flux.
  * @param[in] Olen_in Obukhov length.
  * @param[in] stability_correction Whether to apply stability corrections.
+ * @param[in] wind_floor Wind-speed floor [m/s] behind the friction velocity of the stability estimate (erf.if_stability_wind_floor).
+ * @param[in] psi_cap_factor Cap on psi_m as a fraction of ln(z/z0) (erf.if_psi_cap_factor).
  * @return Target velocity component.
  */
 AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
 amrex::Real
-compute_if_most_target_vel(
+compute_if_most_target_vel (
     const amrex::Real u1_2r,
     const amrex::Real u2_2r,
     const amrex::Real delta,
@@ -33,7 +36,9 @@ compute_if_most_target_vel(
     const amrex::Real theta_surf,
     const amrex::Real tflux_in,
     const amrex::Real Olen_in,
-    const bool        stability_correction
+    const bool        stability_correction,
+    const amrex::Real wind_floor,
+    const amrex::Real psi_cap_factor
 )
 {
     const Real tiny             = std::numeric_limits<amrex::Real>::epsilon();
@@ -41,10 +46,14 @@ compute_if_most_target_vel(
     Real psi_h                  = zero;
     Real tang_windspeed2r       = std::sqrt(u1_2r * u1_2r + u2_2r * u2_2r);
 
-    Real ustar = tang_windspeed2r * KAPPA / (std::log(1.5 * delta / z0) - psi_m);
+    // The stability estimate uses the wind floored at wind_floor, a derived Obukhov length bounded
+    // so that |zeta| <= ib_stability::zeta_max() as on flat ground, and a prescribed one as given
+    // with its zeta held there; the target below uses the actual wind
+    Real ustar = ib_stability::floored_wind(tang_windspeed2r, wind_floor) * KAPPA / (std::log(1.5 * delta / z0) - psi_m);
     Real tflux = (tflux_in != Real(1.e-8)) ? tflux_in : -(theta_face - theta_surf) * ustar * KAPPA / (std::log(1.5 * delta / z0) - psi_h);
-    Real Olen  = (Olen_in != Real(1.e-8))  ? Olen_in  : -ustar * ustar * ustar * theta_face / (KAPPA * CONST_GRAV * tflux + tiny);
-    Real zeta  = 1.5 * delta / Olen;
+    Real Olen  = (Olen_in != Real(1.e-8)) ? Olen_in
+               : ib_stability::bounded_obukhov_length(-ustar * ustar * ustar * theta_face / (KAPPA * CONST_GRAV * tflux + tiny), Real(1.5) * delta);
+    Real zeta  = ib_stability::bounded_zeta(Real(1.5) * delta, Olen);
 
     // similarity functions
     similarity_funs sfuns;
@@ -52,12 +61,11 @@ compute_if_most_target_vel(
         psi_m          = sfuns.calc_psi_m(zeta);
         psi_h          = sfuns.calc_psi_h(zeta);
     }
-    ustar = tang_windspeed2r * KAPPA / (std::log(1.5 * delta / z0) - psi_m);
+    ustar = tang_windspeed2r * KAPPA / (std::log(1.5 * delta / z0) - ib_stability::psi_m_for_ustar(psi_m, Real(1.5) * delta, z0, psi_cap_factor));
 
     // prevent some unphysical math
-    if (!(ustar > zero && !std::isnan(ustar))) { ustar = zero; }
-    if (!(ustar < 2.0  && !std::isnan(ustar))) { ustar = 2.0; }
-    if (psi_m > std::log(myhalf * delta / z0)) { psi_m = std::log(myhalf * delta / z0); }
+    ustar = ib_stability::clamped_ustar(ustar);
+    psi_m = ib_stability::capped_psi(psi_m, myhalf * delta, z0, psi_cap_factor);
 
     Real uTarget      = (1 - t_blank) * ustar / KAPPA * (std::log(myhalf * delta / z0) - psi_m);
     Real u1Target     = uTarget * u1_2r / (tiny + tang_windspeed2r);
@@ -82,7 +90,7 @@ void ImmersedForcingTerrain_Xmom (const Box& tbx,
                                   const Real fac)
 {
     // geometric properties
-    const Real* dx_arr = geom.CellSize();
+    const auto dx_arr = geom.CellSizeArray();
     const Real dx_x = dx_arr[0];
     const Real dx_y = dx_arr[1];
     const Real dt = fac;  // fac is actually dt in the calling code
@@ -99,9 +107,12 @@ void ImmersedForcingTerrain_Xmom (const Box& tbx,
     const Real z0                 = solverChoice.if_z0;
     const Real tflux_in           = solverChoice.if_surf_temp_flux;
     const Real Olen_in            = solverChoice.if_Olen_in;
+    const Real stab_wind_floor    = solverChoice.if_stability_wind_floor;
+    const Real psi_cap_factor     = solverChoice.if_psi_cap_factor;
     const bool l_use_most         = solverChoice.if_use_most;
+    const bool l_stability_correction = solverChoice.if_stability_correction;
 
-    const Real small_volfrac = 0.005;
+    const Real small_volfrac = solverChoice.if_small_volfrac;
     // The terrain kernels keep the raw fractions: erf.if_snap_partial_cells
     // applies to the buildings kernels only (the wall law below is weighted
     // by the fluid fraction of the face, which a snapped face has not).
@@ -145,20 +156,25 @@ void ImmersedForcingTerrain_Xmom (const Box& tbx,
 
             Real psi_m = zero;
             Real psi_h = zero;
-            Real ustar = h_windspeed2r * kappa / (std::log(Real(1.5) * dx_z / z0) - psi_m); // calculated from bottom of cell. Maintains flexibility for different Vf values
+            // The stability estimate uses the wind floored at erf.if_stability_wind_floor, a derived
+            // Obukhov length bounded so that |zeta| <= ib_stability::zeta_max() as on flat ground,
+            // and a prescribed one as given with its zeta held there; the target uses the actual wind
+            Real ustar = ib_stability::floored_wind(h_windspeed2r, stab_wind_floor) * kappa / (std::log(Real(1.5) * dx_z / z0) - psi_m); // calculated from bottom of cell. Maintains flexibility for different Vf values
             Real tflux = (tflux_in != Real(1e-8)) ? tflux_in : -(theta_xface - theta_surf) * ustar * kappa / (std::log(Real(1.5) * dx_z / z0) - psi_h);
-            Real Olen  = (Olen_in  != Real(1e-8)) ? Olen_in  : -ustar * ustar * ustar * theta_xface / (kappa * ggg * tflux + tiny);
-            Real zeta  = Real(1.5) * dx_z / Olen;
+            Real Olen  = (Olen_in  != Real(1e-8)) ? Olen_in
+                       : ib_stability::bounded_obukhov_length(-ustar * ustar * ustar * theta_xface / (kappa * ggg * tflux + tiny), Real(1.5) * dx_z);
+            Real zeta  = ib_stability::bounded_zeta(Real(1.5) * dx_z, Olen);
 
-            // similarity functions
-            psi_m          = sfuns.calc_psi_m(zeta);
-            psi_h          = sfuns.calc_psi_h(zeta);
-            ustar = h_windspeed2r * kappa / (std::log(Real(1.5) * dx_z / z0) - psi_m);
+            // similarity functions (off by default: the plain log law)
+            if (l_stability_correction) {
+                psi_m          = sfuns.calc_psi_m(zeta);
+                psi_h          = sfuns.calc_psi_h(zeta);
+            }
+            ustar = h_windspeed2r * kappa / (std::log(Real(1.5) * dx_z / z0) - ib_stability::psi_m_for_ustar(psi_m, Real(1.5) * dx_z, z0, psi_cap_factor));
 
             // prevent some unphysical math
-            if (!(ustar > zero && !std::isnan(ustar))) { ustar = zero; }
-            if (!(ustar < two && !std::isnan(ustar))) { ustar = two; }
-            if (psi_m > std::log(myhalf * dx_z / z0)) { psi_m = std::log(myhalf * dx_z / z0); }
+            ustar = ib_stability::clamped_ustar(ustar);
+            psi_m = ib_stability::capped_psi(psi_m, myhalf * dx_z, z0, psi_cap_factor);
 
             // determine target velocity
             const Real uTarget  = ustar / kappa * (std::log(myhalf * dx_z / z0) - psi_m);
@@ -192,7 +208,7 @@ void ImmersedForcingTerrain_Ymom (const Box& tby,
                                   const Real fac)
 {
     // geometric properties
-    const Real* dx_arr = geom.CellSize();
+    const auto dx_arr = geom.CellSizeArray();
     const Real dx_x = dx_arr[0];
     const Real dx_y = dx_arr[1];
     const Real dt = fac;  // fac is actually dt in the calling code
@@ -209,9 +225,12 @@ void ImmersedForcingTerrain_Ymom (const Box& tby,
     const Real z0                 = solverChoice.if_z0;
     const Real tflux_in           = solverChoice.if_surf_temp_flux;
     const Real Olen_in            = solverChoice.if_Olen_in;
+    const Real stab_wind_floor    = solverChoice.if_stability_wind_floor;
+    const Real psi_cap_factor     = solverChoice.if_psi_cap_factor;
     const bool l_use_most         = solverChoice.if_use_most;
+    const bool l_stability_correction = solverChoice.if_stability_correction;
 
-    const Real small_volfrac = 0.005;
+    const Real small_volfrac = solverChoice.if_small_volfrac;
     // The terrain kernels keep the raw fractions: erf.if_snap_partial_cells
     // applies to the buildings kernels only (the wall law below is weighted
     // by the fluid fraction of the face, which a snapped face has not).
@@ -254,20 +273,25 @@ void ImmersedForcingTerrain_Ymom (const Box& tby,
 
             Real psi_m = zero;
             Real psi_h = zero;
-            Real ustar = h_windspeed2r * kappa / (std::log(Real(1.5) * dx_z / z0) - psi_m); // calculated from bottom of cell. Maintains flexibility for different Vf values
+            // The stability estimate uses the wind floored at erf.if_stability_wind_floor, a derived
+            // Obukhov length bounded so that |zeta| <= ib_stability::zeta_max() as on flat ground,
+            // and a prescribed one as given with its zeta held there; the target uses the actual wind
+            Real ustar = ib_stability::floored_wind(h_windspeed2r, stab_wind_floor) * kappa / (std::log(Real(1.5) * dx_z / z0) - psi_m); // calculated from bottom of cell. Maintains flexibility for different Vf values
             Real tflux = (tflux_in != Real(1e-8)) ? tflux_in : -(theta_yface - theta_surf) * ustar * kappa / (std::log(Real(1.5) * dx_z / z0) - psi_h);
-            Real Olen  = (Olen_in  != Real(1e-8)) ? Olen_in  : -ustar * ustar * ustar * theta_yface / (kappa * ggg * tflux + tiny);
-            Real zeta  = Real(1.5) * dx_z / Olen;
+            Real Olen  = (Olen_in  != Real(1e-8)) ? Olen_in
+                       : ib_stability::bounded_obukhov_length(-ustar * ustar * ustar * theta_yface / (kappa * ggg * tflux + tiny), Real(1.5) * dx_z);
+            Real zeta  = ib_stability::bounded_zeta(Real(1.5) * dx_z, Olen);
 
-            // similarity functions
-            psi_m          = sfuns.calc_psi_m(zeta);
-            psi_h          = sfuns.calc_psi_h(zeta);
-            ustar = h_windspeed2r * kappa / (std::log(Real(1.5) * dx_z / z0) - psi_m);
+            // similarity functions (off by default: the plain log law)
+            if (l_stability_correction) {
+                psi_m          = sfuns.calc_psi_m(zeta);
+                psi_h          = sfuns.calc_psi_h(zeta);
+            }
+            ustar = h_windspeed2r * kappa / (std::log(Real(1.5) * dx_z / z0) - ib_stability::psi_m_for_ustar(psi_m, Real(1.5) * dx_z, z0, psi_cap_factor));
 
             // prevent some unphysical math
-            if (!(ustar > zero && !std::isnan(ustar))) { ustar = zero; }
-            if (!(ustar < two && !std::isnan(ustar))) { ustar = two; }
-            if (psi_m > std::log(myhalf * dx_z / z0)) { psi_m = std::log(myhalf * dx_z / z0); }
+            ustar = ib_stability::clamped_ustar(ustar);
+            psi_m = ib_stability::capped_psi(psi_m, myhalf * dx_z, z0, psi_cap_factor);
 
             // determine target velocity
             const Real uTarget  = ustar / kappa * (std::log(myhalf * dx_z / z0) - psi_m);
@@ -301,7 +325,7 @@ void ImmersedForcingTerrain_Zmom (const Box& tbz,
                                   const Real fac)
 {
     // geometric properties
-    const Real* dx_arr = geom.CellSize();
+    const auto dx_arr = geom.CellSizeArray();
     const Real dx_x = dx_arr[0];
     const Real dx_y = dx_arr[1];
     const Real dt = fac;  // fac is actually dt in the calling code
@@ -310,7 +334,7 @@ void ImmersedForcingTerrain_Zmom (const Box& tbz,
     const Real tiny = std::numeric_limits<amrex::Real>::epsilon();
     const bool l_implicit_drag = solverChoice.if_implicit_drag;
 
-    const Real small_volfrac = 0.005;
+    const Real small_volfrac = solverChoice.if_small_volfrac;
     // The terrain kernels keep the raw fractions: erf.if_snap_partial_cells
     // applies to the buildings kernels only (the wall law below is weighted
     // by the fluid fraction of the face, which a snapped face has not).
@@ -356,7 +380,7 @@ void ImmersedForcingBuildings_Xmom (const Box& tbx,
                                     const Real fac)
 {
     // geometric properties
-    const Real* dx_arr = geom.CellSize();
+    const auto dx_arr = geom.CellSizeArray();
     const Real dx_x = dx_arr[0];
     const Real dx_y = dx_arr[1];
     const Real dt = fac;
@@ -369,6 +393,8 @@ void ImmersedForcingBuildings_Xmom (const Box& tbx,
     const Real z0                      = solverChoice.if_z0;
     const Real tflux_in                = solverChoice.if_surf_temp_flux;
     const Real Olen_in                 = solverChoice.if_Olen_in;
+    const Real stab_wind_floor         = solverChoice.if_stability_wind_floor;
+    const Real psi_cap_factor          = solverChoice.if_psi_cap_factor;
     const bool l_use_most              = solverChoice.if_use_most;
     const bool l_stability_correction  = solverChoice.if_stability_correction;
 
@@ -380,7 +406,7 @@ void ImmersedForcingBuildings_Xmom (const Box& tbx,
 
     const bool is_slow_step = true;  // This is determined by calling context
     const bool use_ImmersedForcing_fast = solverChoice.immersed_forcing_substep;
-    const Real small_volfrac = 0.005;
+    const Real small_volfrac = solverChoice.if_small_volfrac;
     // erf.if_snap_partial_cells: read the cell blanking snapped to solid (1)
     // or fluid (0) at half, so a height-map building becomes the same
     // staircase of whole cells an exact box is. A face is solid when either
@@ -476,7 +502,7 @@ void ImmersedForcingBuildings_Xmom (const Box& tbx,
                                            + v(i, j+1, k+1) + v(i-1, j+1, k+1) ) ;
             rho_xface_inside    =  myhalf * (cell_data(i,j,k-1,Rho_comp) + cell_data(i-1,j,k-1,Rho_comp));
             theta_surf          = (myhalf * (cell_data(i,j,k-1,RhoTheta_comp) + cell_data(i-1,j,k-1, RhoTheta_comp))) / rho_xface_inside;
-            u_target            = compute_if_most_target_vel(u1_cellaway, u2_cellaway, dx_z, z0, t_blank_law, theta_xface, theta_surf, tflux_in, Olen_in, l_stability_correction);
+            u_target            = compute_if_most_target_vel(u1_cellaway, u2_cellaway, dx_z, z0, t_blank_law, theta_xface, theta_surf, tflux_in, Olen_in, l_stability_correction, stab_wind_floor, psi_cap_factor);
             bc_forcing_x        = -(u_target - ux); // BC forcing pushes nonrelative velocity toward target velocity
             drag               += bc_forcing_x * roof_mask * rho_xface * CdM * U_s;
         }
@@ -488,7 +514,7 @@ void ImmersedForcingBuildings_Xmom (const Box& tbx,
                                            + w(i, j-1, k+1) + w(i-1, j-1, k+1) ) ;
             rho_xface_inside    = myhalf * ( cell_data(i,j+1,k,Rho_comp) + cell_data(i-1,j+1,k,Rho_comp) );
             theta_surf          = (myhalf * (cell_data(i,j+1,k,RhoTheta_comp) + cell_data(i-1,j+1,k, RhoTheta_comp))) / rho_xface_inside;
-            u_target            = compute_if_most_target_vel(u1_cellaway, u2_cellaway, dx_y, z0, t_blank_law, theta_xface, theta_surf, tflux_in, Olen_in, l_stability_correction);
+            u_target            = compute_if_most_target_vel(u1_cellaway, u2_cellaway, dx_y, z0, t_blank_law, theta_xface, theta_surf, tflux_in, Olen_in, l_stability_correction, stab_wind_floor, psi_cap_factor);
             bc_forcing_x        = -(u_target - ux); // BC forcing pushes nonrelative velocity toward target velocity
             drag               += bc_forcing_x * south_mask * rho_xface * CdM * U_s;
         }
@@ -500,7 +526,7 @@ void ImmersedForcingBuildings_Xmom (const Box& tbx,
                                            + w(i, j+1, k+1) + w(i-1, j+1, k+1) ) ;
             rho_xface_inside    = myhalf * ( cell_data(i,j-1,k,Rho_comp) + cell_data(i-1,j-1,k,Rho_comp) );
             theta_surf          = (myhalf * (cell_data(i,j-1,k,RhoTheta_comp) + cell_data(i-1,j-1,k, RhoTheta_comp))) / rho_xface_inside;
-            u_target            = compute_if_most_target_vel(u1_cellaway, u2_cellaway, dx_y, z0, t_blank_law, theta_xface, theta_surf, tflux_in, Olen_in, l_stability_correction);
+            u_target            = compute_if_most_target_vel(u1_cellaway, u2_cellaway, dx_y, z0, t_blank_law, theta_xface, theta_surf, tflux_in, Olen_in, l_stability_correction, stab_wind_floor, psi_cap_factor);
             bc_forcing_x        = -(u_target - ux); // BC forcing pushes nonrelative velocity toward target velocity
             drag               += bc_forcing_x * north_mask * rho_xface * CdM * U_s;
         }
@@ -553,7 +579,7 @@ void ImmersedForcingBuildings_Ymom (const Box& tby,
                                     const Real fac)
 {
     // geometric properties
-    const Real* dx_arr = geom.CellSize();
+    const auto dx_arr = geom.CellSizeArray();
     const Real dx_x = dx_arr[0];
     const Real dx_y = dx_arr[1];
     const Real dt = fac;
@@ -566,6 +592,8 @@ void ImmersedForcingBuildings_Ymom (const Box& tby,
     const Real z0                      = solverChoice.if_z0;
     const Real tflux_in                = solverChoice.if_surf_temp_flux;
     const Real Olen_in                 = solverChoice.if_Olen_in;
+    const Real stab_wind_floor         = solverChoice.if_stability_wind_floor;
+    const Real psi_cap_factor          = solverChoice.if_psi_cap_factor;
     const bool l_use_most              = solverChoice.if_use_most;
     const bool l_stability_correction  = solverChoice.if_stability_correction;
 
@@ -577,7 +605,7 @@ void ImmersedForcingBuildings_Ymom (const Box& tby,
 
     const bool is_slow_step = true;  // This is determined by calling context
     const bool use_ImmersedForcing_fast = solverChoice.immersed_forcing_substep;
-    const Real small_volfrac = 0.005;
+    const Real small_volfrac = solverChoice.if_small_volfrac;
     // erf.if_snap_partial_cells: read the cell blanking snapped to solid (1)
     // or fluid (0) at half, so a height-map building becomes the same
     // staircase of whole cells an exact box is. A face is solid when either
@@ -672,7 +700,7 @@ void ImmersedForcingBuildings_Ymom (const Box& tby,
             u2_cellaway         = v(i, j, k+1);
             rho_yface_inside    = myhalf * ( cell_data(i,j,k-1,Rho_comp) + cell_data(i,j-1,k-1,Rho_comp) );
             theta_surf          = (myhalf * (cell_data(i,j,k-1,RhoTheta_comp) + cell_data(i,j-1,k-1,RhoTheta_comp))) / rho_yface_inside;
-            u_target            = compute_if_most_target_vel(u1_cellaway, u2_cellaway, dx_z, z0, t_blank_law, theta_yface, theta_surf, tflux_in, Olen_in, l_stability_correction);
+            u_target            = compute_if_most_target_vel(u1_cellaway, u2_cellaway, dx_z, z0, t_blank_law, theta_yface, theta_surf, tflux_in, Olen_in, l_stability_correction, stab_wind_floor, psi_cap_factor);
             bc_forcing_y        = -(u_target - uy); // BC forcing pushes nonrelative velocity toward target velocity
             drag               += bc_forcing_y * roof_mask * rho_yface * CdM * U_s;
         }
@@ -684,7 +712,7 @@ void ImmersedForcingBuildings_Ymom (const Box& tby,
                                            + w(i-1, j  , k+1) + w(i-1, j-1, k+1) );
             rho_yface_inside    = myhalf * ( cell_data(i+1,j,k,Rho_comp) + cell_data(i+1,j-1,k,Rho_comp) );
             theta_surf          = (myhalf * (cell_data(i+1,j,k,RhoTheta_comp) + cell_data(i+1,j-1,k,RhoTheta_comp))) / rho_yface_inside;
-            u_target            = compute_if_most_target_vel(u1_cellaway, u2_cellaway, dx_x, z0, t_blank_law, theta_yface, theta_surf, tflux_in, Olen_in, l_stability_correction);
+            u_target            = compute_if_most_target_vel(u1_cellaway, u2_cellaway, dx_x, z0, t_blank_law, theta_yface, theta_surf, tflux_in, Olen_in, l_stability_correction, stab_wind_floor, psi_cap_factor);
             bc_forcing_y        = -(u_target - uy); // BC forcing pushes nonrelative velocity toward target velocity
             drag               += bc_forcing_y * west_mask * rho_yface * CdM * U_s;
         }
@@ -696,7 +724,7 @@ void ImmersedForcingBuildings_Ymom (const Box& tby,
                                            + w(i+1, j  , k+1) + w(i+1, j-1, k+1) );
             rho_yface_inside    = myhalf * ( cell_data(i-1,j,k,Rho_comp) + cell_data(i-1,j-1,k,Rho_comp) );
             theta_surf          = (myhalf * (cell_data(i-1,j,k,RhoTheta_comp) + cell_data(i-1,j-1,k,RhoTheta_comp))) / rho_yface_inside;
-            u_target            = compute_if_most_target_vel(u1_cellaway, u2_cellaway, dx_x, z0, t_blank_law, theta_yface, theta_surf, tflux_in, Olen_in, l_stability_correction);
+            u_target            = compute_if_most_target_vel(u1_cellaway, u2_cellaway, dx_x, z0, t_blank_law, theta_yface, theta_surf, tflux_in, Olen_in, l_stability_correction, stab_wind_floor, psi_cap_factor);
             bc_forcing_y        = -(u_target - uy); // BC forcing pushes nonrelative velocity toward target velocity
             drag               += bc_forcing_y * east_mask * rho_yface * CdM * U_s;
         }
@@ -749,7 +777,7 @@ void ImmersedForcingBuildings_Zmom (const Box& tbz,
                                     const Real fac)
 {
     // geometric properties
-    const Real* dx_arr = geom.CellSize();
+    const auto dx_arr = geom.CellSizeArray();
     const Real dx_x = dx_arr[0];
     const Real dx_y = dx_arr[1];
     const Real dt = fac;
@@ -762,6 +790,8 @@ void ImmersedForcingBuildings_Zmom (const Box& tbz,
     const Real z0                      = solverChoice.if_z0;
     const Real tflux_in                = solverChoice.if_surf_temp_flux;
     const Real Olen_in                 = solverChoice.if_Olen_in;
+    const Real stab_wind_floor         = solverChoice.if_stability_wind_floor;
+    const Real psi_cap_factor          = solverChoice.if_psi_cap_factor;
     const bool l_use_most              = solverChoice.if_use_most;
     const bool l_stability_correction  = solverChoice.if_stability_correction;
 
@@ -773,7 +803,7 @@ void ImmersedForcingBuildings_Zmom (const Box& tbz,
 
     const bool is_slow_step = true;  // This is determined by calling context
     const bool use_ImmersedForcing_fast = solverChoice.immersed_forcing_substep;
-    const Real small_volfrac = 0.005;
+    const Real small_volfrac = solverChoice.if_small_volfrac;
     // erf.if_snap_partial_cells: read the cell blanking snapped to solid (1)
     // or fluid (0) at half, so a height-map building becomes the same
     // staircase of whole cells an exact box is. A face is solid when either
@@ -871,7 +901,7 @@ void ImmersedForcingBuildings_Zmom (const Box& tbz,
             u2_cellaway         = w(i, j-1, k);
             rho_zface_inside    = myhalf * ( cell_data(i,j+1,k,Rho_comp) + cell_data(i,j+1,k-1,Rho_comp) );
             theta_surf          = (myhalf * (cell_data(i,j+1,k,RhoTheta_comp) + cell_data(i,j+1,k-1,RhoTheta_comp))) / rho_zface_inside;
-            u_target            = compute_if_most_target_vel(u1_cellaway, u2_cellaway, dx_y, z0, t_blank_law, theta_zface, theta_surf, tflux_in, Olen_in, l_stability_correction);
+            u_target            = compute_if_most_target_vel(u1_cellaway, u2_cellaway, dx_y, z0, t_blank_law, theta_zface, theta_surf, tflux_in, Olen_in, l_stability_correction, stab_wind_floor, psi_cap_factor);
             bc_forcing_z        = -(u_target - uz); // BC forcing pushes nonrelative velocity toward target velocity
             drag               += bc_forcing_z * south_mask * rho_zface * CdM * U_s;
         }
@@ -883,7 +913,7 @@ void ImmersedForcingBuildings_Zmom (const Box& tbz,
             u2_cellaway         = w(i, j+1, k);
             rho_zface_inside    = myhalf * ( cell_data(i,j-1,k,Rho_comp) + cell_data(i,j-1,k-1,Rho_comp) );
             theta_surf          = (myhalf * (cell_data(i,j-1,k,RhoTheta_comp) + cell_data(i,j-1,k-1,RhoTheta_comp))) / rho_zface_inside;
-            u_target            = compute_if_most_target_vel(u1_cellaway, u2_cellaway, dx_y, z0, t_blank_law, theta_zface, theta_surf, tflux_in, Olen_in, l_stability_correction);
+            u_target            = compute_if_most_target_vel(u1_cellaway, u2_cellaway, dx_y, z0, t_blank_law, theta_zface, theta_surf, tflux_in, Olen_in, l_stability_correction, stab_wind_floor, psi_cap_factor);
             bc_forcing_z        = -(u_target - uz); // BC forcing pushes nonrelative velocity toward target velocity
             drag               += bc_forcing_z * north_mask * rho_zface * CdM * U_s;
         }
@@ -895,7 +925,7 @@ void ImmersedForcingBuildings_Zmom (const Box& tbz,
             u2_cellaway         = w(i-1, j, k);
             rho_zface_inside    = myhalf * ( cell_data(i+1,j,k,Rho_comp) + cell_data(i+1,j,k-1,Rho_comp) );
             theta_surf          = (myhalf * (cell_data(i+1,j,k,RhoTheta_comp) + cell_data(i+1,j,k-1,RhoTheta_comp))) / rho_zface_inside;
-            u_target            = compute_if_most_target_vel(u1_cellaway, u2_cellaway, dx_x, z0, t_blank_law, theta_zface, theta_surf, tflux_in, Olen_in, l_stability_correction);
+            u_target            = compute_if_most_target_vel(u1_cellaway, u2_cellaway, dx_x, z0, t_blank_law, theta_zface, theta_surf, tflux_in, Olen_in, l_stability_correction, stab_wind_floor, psi_cap_factor);
             bc_forcing_z        = -(u_target - uz); // BC forcing pushes nonrelative velocity toward target velocity
             drag               += bc_forcing_z * west_mask * rho_zface * CdM * U_s;
         }
@@ -907,7 +937,7 @@ void ImmersedForcingBuildings_Zmom (const Box& tbz,
             u2_cellaway         = w(i+1, j, k);
             rho_zface_inside    = myhalf * ( cell_data(i-1,j,k,Rho_comp) + cell_data(i-1,j,k-1,Rho_comp) );
             theta_surf          = (myhalf * (cell_data(i-1,j,k,RhoTheta_comp) + cell_data(i-1,j,k-1,RhoTheta_comp))) / rho_zface_inside;
-            u_target            = compute_if_most_target_vel(u1_cellaway, u2_cellaway, dx_x, z0, t_blank_law, theta_zface, theta_surf, tflux_in, Olen_in, l_stability_correction);
+            u_target            = compute_if_most_target_vel(u1_cellaway, u2_cellaway, dx_x, z0, t_blank_law, theta_zface, theta_surf, tflux_in, Olen_in, l_stability_correction, stab_wind_floor, psi_cap_factor);
             bc_forcing_z        = -(u_target - uz); // BC forcing pushes nonrelative velocity toward target velocity
             drag               += bc_forcing_z * east_mask * rho_zface * CdM * U_s;
         }
@@ -947,20 +977,20 @@ void ImmersedForcingBuildings_Zmom (const Box& tbz,
  * Apply terrain immersed forcing to scalars (Rho, RhoTheta)
  */
 void ImmersedForcingTerrain_Scalar (const Box& bx,
-                                   const Array4<const Real>& u,
-                                   const Array4<const Real>& v,
-                                   const Array4<const Real>& cell_data,
-                                   const Array4<const Real>& t_blank_arr,
-                                   const Array4<const Real>& z_cc_arr,
-                                   const Array4<      Real>& cell_src,
-                                   const Geometry& geom,
-                                   const SolverChoice& solverChoice,
-                                   const Table1D<Real>& r_avg,
-                                   const Table1D<Real>& t_avg,
-                                   const Real time)
+                                    const Array4<const Real>& u,
+                                    const Array4<const Real>& v,
+                                    const Array4<const Real>& cell_data,
+                                    const Array4<const Real>& t_blank_arr,
+                                    const Array4<const Real>& z_cc_arr,
+                                    const Array4<      Real>& cell_src,
+                                    const Geometry& geom,
+                                    const SolverChoice& solverChoice,
+                                    const Table1D<Real>& r_avg,
+                                    const Table1D<Real>& t_avg,
+                                    const Real time)
 {
     // geometric properties
-    const Real* dx_arr = geom.CellSize();
+    const auto dx_arr = geom.CellSizeArray();
     const Real dx_x = dx_arr[0];
     const Real dx_y = dx_arr[1];
 
@@ -983,6 +1013,7 @@ void ImmersedForcingTerrain_Scalar (const Box& bx,
     const Real surf_heating_rate  = solverChoice.if_surf_heating_rate;
 
     const Real Olen_in            = solverChoice.if_Olen_in;
+    const Real stab_wind_floor    = solverChoice.if_stability_wind_floor;
 
     ParallelFor(bx, [=]
                 AMREX_GPU_DEVICE(int i, int j, int k) noexcept
@@ -994,7 +1025,9 @@ void ImmersedForcingTerrain_Scalar (const Box& bx,
         const Real t_blank_above = t_blank_arr(i, j, k+1);
         const Real ux_cc_2r = myhalf * (u(i  ,j  ,k+1) + u(i+1,j  ,k+1));
         const Real uy_cc_2r = myhalf * (v(i  ,j  ,k+1) + v(i  ,j+1,k+1));
-        const Real h_windspeed2r  = std::sqrt(ux_cc_2r * ux_cc_2r + uy_cc_2r * uy_cc_2r);
+        // The heat transfer uses the wind floored at erf.if_stability_wind_floor and an Obukhov
+        // length bounded so that |zeta| <= ib_stability::zeta_max(), as on flat ground
+        const Real h_windspeed2r  = ib_stability::floored_wind(std::sqrt(ux_cc_2r * ux_cc_2r + uy_cc_2r * uy_cc_2r), stab_wind_floor);
 
         const Real theta          = cell_data(i,j,k  ,RhoTheta_comp) / cell_data(i,j,k  ,Rho_comp);
         const Real theta_neighbor = cell_data(i,j,k+1,RhoTheta_comp) / cell_data(i,j,k+1,Rho_comp);
@@ -1015,9 +1048,10 @@ void ImmersedForcingTerrain_Scalar (const Box& bx,
                 Real psi_h           = zero;
                 Real psi_h_neighbor  = zero;
                 Real ustar = h_windspeed2r * kappa / (std::log((Real(1.5)) * dx_z / z0) - psi_m);
-                const Real Olen  = -ustar * ustar * ustar * theta / (kappa * ggg * tflux + tiny);
-                const Real zeta          = (myhalf) * dx_z / Olen;
-                const Real zeta_neighbor = (Real(1.5)) * dx_z / Olen;
+                const Real Olen  = ib_stability::bounded_obukhov_length(-ustar * ustar * ustar * theta / (kappa * ggg * tflux + tiny),
+                                                                        Real(1.5) * dx_z);
+                const Real zeta          = ib_stability::bounded_zeta(myhalf * dx_z, Olen);
+                const Real zeta_neighbor = ib_stability::bounded_zeta(Real(1.5) * dx_z, Olen);
 
                 // similarity functions
                 psi_m          = sfuns.calc_psi_m(zeta);
@@ -1026,10 +1060,12 @@ void ImmersedForcingTerrain_Scalar (const Box& bx,
                 ustar = h_windspeed2r * kappa / (std::log((Real(1.5)) * dx_z / z0) - psi_m);
 
                 // prevent some unphysical math
-                if (!(ustar > zero && !std::isnan(ustar))) { ustar = zero; }
-                if (!(ustar < two && !std::isnan(ustar))) { ustar = two; }
-                if (psi_h_neighbor > std::log(Real(1.5) * dx_z / z0)) { psi_h_neighbor = std::log(Real(1.5) * dx_z / z0); }
-                if (psi_h > std::log(myhalf * dx_z / z0)) { psi_h = std::log(myhalf * dx_z / z0); }
+                ustar = ib_stability::clamped_ustar(ustar);
+                // caps of ln(z / z0): erf.if_psi_cap_factor stays off the temperature forcing, whose
+                // theta* comes from an L not made consistent with u* (the legacy law, kept as it is;
+                // the fraction-stress law of erf-model/ERF#4134 forms them consistently)
+                psi_h_neighbor = ib_stability::capped_psi(psi_h_neighbor, Real(1.5) * dx_z, z0, one);
+                psi_h = ib_stability::capped_psi(psi_h, myhalf * dx_z, z0, one);
 
                 // We do not know the actual temperature so use cell above
                 const Real thetastar    = theta * ustar * ustar / (kappa * ggg * Olen);
@@ -1044,15 +1080,20 @@ void ImmersedForcingTerrain_Scalar (const Box& bx,
         // OBUKHOV LENGTH
         if (Olen_in != Real(1e-8)){
             if (t_blank > 0 && (t_blank_above == zero)) { // force to MOST value
+                // the prescribed length as given, with its zeta held within +-zeta_max()
                 const Real Olen  = Olen_in;
-                const Real zeta          = (myhalf) * dx_z / Olen;
-                const Real zeta_neighbor = (Real(1.5)) * dx_z / Olen;
+                const Real zeta          = ib_stability::bounded_zeta(myhalf * dx_z, Olen);
+                const Real zeta_neighbor = ib_stability::bounded_zeta(Real(1.5) * dx_z, Olen);
 
-                // similarity functions
+                // similarity functions; psi_h capped at ln(z / z0) as on the other temperature branches
                 const Real psi_m          = sfuns.calc_psi_m(zeta);
-                const Real psi_h          = sfuns.calc_psi_h(zeta);
-                const Real psi_h_neighbor = sfuns.calc_psi_h(zeta_neighbor);
-                const Real ustar = h_windspeed2r * kappa / (std::log((Real(1.5)) * dx_z / z0) - psi_m);
+                const Real psi_h          = ib_stability::capped_psi(sfuns.calc_psi_h(zeta), myhalf * dx_z, z0, one);
+                const Real psi_h_neighbor = ib_stability::capped_psi(sfuns.calc_psi_h(zeta_neighbor), Real(1.5) * dx_z, z0, one);
+                // psi_m at 0.5 dz against ln(1.5 dz / z0) can cancel; u* is held in [0, 2] m/s as on the
+                // other branches. In unstable air psi_h >= psi_m and psi_h grows with |zeta|, so wherever
+                // psi_m reaches ln(1.5 dz / z0) both psi_h caps above bind, the two log brackets close
+                // and the target is the cell above whatever u* is: the clamp only guards the arithmetic.
+                const Real ustar = ib_stability::clamped_ustar(h_windspeed2r * kappa / (std::log((Real(1.5)) * dx_z / z0) - psi_m));
 
                 // We do not know the actual temperature so use cell above
                 const Real thetastar    = theta * ustar * ustar / (kappa * ggg * Olen);
@@ -1082,21 +1123,21 @@ void ImmersedForcingTerrain_Scalar (const Box& bx,
  * Apply buildings immersed forcing to scalars (Rho, RhoTheta)
  */
 void ImmersedForcingBuildings_Scalar (const Box& bx,
-                                     const Array4<const Real>& u,
-                                     const Array4<const Real>& v,
-                                     const Array4<const Real>& w,
-                                     const Array4<const Real>& cell_data,
-                                     const Array4<const Real>& t_blank_arr,
-                                     const Array4<const Real>& z_cc_arr,
-                                     const Array4<      Real>& cell_src,
-                                     const Geometry& geom,
-                                     const SolverChoice& solverChoice,
-                                     const Table1D<Real>& r_avg,
-                                     const Table1D<Real>& t_avg,
-                                     const Real time)
+                                      const Array4<const Real>& u,
+                                      const Array4<const Real>& v,
+                                      const Array4<const Real>& w,
+                                      const Array4<const Real>& cell_data,
+                                      const Array4<const Real>& t_blank_arr,
+                                      const Array4<const Real>& z_cc_arr,
+                                      const Array4<      Real>& cell_src,
+                                      const Geometry& geom,
+                                      const SolverChoice& solverChoice,
+                                      const Table1D<Real>& r_avg,
+                                      const Table1D<Real>& t_avg,
+                                      const Real time)
 {
     // geometric properties
-    const Real* dx_arr = geom.CellSize();
+    const auto dx_arr = geom.CellSizeArray();
     const Real dx_x = dx_arr[0];
     const Real dx_y = dx_arr[1];
 
@@ -1122,7 +1163,7 @@ void ImmersedForcingBuildings_Scalar (const Box& bx,
     const Real tflux              = solverChoice.if_surf_temp_flux;
     const Real init_surf_temp     = solverChoice.if_init_surf_temp;
     const Real surf_heating_rate  = solverChoice.if_surf_heating_rate;
-    const Real Olen_in            = solverChoice.if_Olen_in;
+    const Real stab_wind_floor    = solverChoice.if_stability_wind_floor;
 
     ParallelFor(bx, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept
     {
@@ -1192,7 +1233,9 @@ void ImmersedForcingBuildings_Scalar (const Box& bx,
         if (tflux != Real(1.e-8)){
             const Real ux_cc_2r = myhalf * (u(i  ,j  ,k+1) + u(i+1,j  ,k+1));
             const Real uy_cc_2r = myhalf * (v(i  ,j  ,k+1) + v(i  ,j+1,k+1));
-            const Real h_windspeed2r  = std::sqrt(ux_cc_2r * ux_cc_2r + uy_cc_2r * uy_cc_2r);
+            // The heat transfer uses the wind floored at erf.if_stability_wind_floor and an Obukhov
+            // length bounded so that |zeta| <= ib_stability::zeta_max(), as on flat ground
+            const Real h_windspeed2r  = ib_stability::floored_wind(std::sqrt(ux_cc_2r * ux_cc_2r + uy_cc_2r * uy_cc_2r), stab_wind_floor);
 
             const Real theta          = cell_data(i,j,k  ,RhoTheta_comp) / cell_data(i,j,k  ,Rho_comp);
             Real theta_neighbor       = cell_data(i,j,k+1,RhoTheta_comp) / cell_data(i,j,k+1,Rho_comp);
@@ -1202,12 +1245,13 @@ void ImmersedForcingBuildings_Scalar (const Box& bx,
                 Real psi_h           = zero;
                 Real psi_h_neighbor  = zero;
                 Real ustar           = h_windspeed2r * kappa / (std::log((1.5) * dx_z / z0) - psi_m);
-                Real Olen            = (Olen_in  != Real(1e-8)) ? Olen_in  : -ustar * ustar * ustar * theta / (kappa * ggg * tflux + tiny);
+                // (start-up refuses erf.if_Olen with a surface flux, so L always comes from the flux here)
+                Real Olen            = ib_stability::bounded_obukhov_length(-ustar * ustar * ustar * theta / (kappa * ggg * tflux + tiny), Real(1.5) * dx_z);
 
                 for (int iter = 0; iter < 2; ++iter) {
-                    if (iter > 0) { Olen  = -ustar * ustar * ustar * theta / (kappa * ggg * tflux + tiny); }
-                    Real zeta          = (myhalf) * dx_z / Olen;
-                    Real zeta_neighbor = (1.5)    * dx_z / Olen;
+                    if (iter > 0) { Olen  = ib_stability::bounded_obukhov_length(-ustar * ustar * ustar * theta / (kappa * ggg * tflux + tiny), Real(1.5) * dx_z); }
+                    Real zeta          = ib_stability::bounded_zeta(myhalf * dx_z, Olen);
+                    Real zeta_neighbor = ib_stability::bounded_zeta(Real(1.5) * dx_z, Olen);
 
                     // similarity functions
                     psi_m          = sfuns.calc_psi_m(zeta);
@@ -1217,10 +1261,12 @@ void ImmersedForcingBuildings_Scalar (const Box& bx,
                 }
 
                 // prevent some unphysical math
-                if (!(ustar > zero && !std::isnan(ustar))) { ustar = zero; }
-                if (!(ustar < 2.0  && !std::isnan(ustar))) { ustar = 2.0; }
-                if (psi_h_neighbor > std::log(1.5 * dx_z / z0)) { psi_h_neighbor = std::log(1.5 * dx_z / z0); }
-                if (psi_h > std::log(myhalf * dx_z / z0)) { psi_h = std::log(myhalf * dx_z / z0); }
+                ustar = ib_stability::clamped_ustar(ustar);
+                // caps of ln(z / z0): erf.if_psi_cap_factor stays off the temperature forcing, whose
+                // theta* comes from an L not made consistent with u* (the legacy law, kept as it is;
+                // the fraction-stress law of erf-model/ERF#4134 forms them consistently)
+                psi_h_neighbor = ib_stability::capped_psi(psi_h_neighbor, Real(1.5) * dx_z, z0, one);
+                psi_h = ib_stability::capped_psi(psi_h, myhalf * dx_z, z0, one);
 
                 // We do not know the actual temperature so use cell above
                 const Real thetastar    = theta * ustar * ustar / (kappa * ggg * Olen);
@@ -1287,18 +1333,18 @@ void ImmersedForcingBuildings_Scalar (const Box& bx,
                     theta_neighbor = cell_data(i+1,j,k,RhoTheta_comp) / cell_data(i+1,j,k,Rho_comp);
                 }
 
-                Real tan_wspd = std::sqrt(u1 * u1 + u2 * u2);
+                Real tan_wspd = ib_stability::floored_wind(std::sqrt(u1 * u1 + u2 * u2), stab_wind_floor);
 
                 Real psi_m           = zero;
                 Real psi_h           = zero;
                 Real psi_h_neighbor  = zero;
                 Real ustar           = tan_wspd * kappa / (std::log(1.5 * delta / z0) - psi_m);
-                Real Olen            = (Olen_in  != Real(1e-8)) ? Olen_in  : -ustar * ustar * ustar * theta / (kappa * ggg * tflux + tiny);
+                Real Olen            = ib_stability::bounded_obukhov_length(-ustar * ustar * ustar * theta / (kappa * ggg * tflux + tiny), Real(1.5) * delta);
 
                 for (int iter = 0; iter < 2; ++iter) {
-                    if (iter > 0) { Olen  = -ustar * ustar * ustar * theta / (kappa * ggg * tflux + tiny); }
-                    Real zeta          = (myhalf) * delta / Olen;
-                    Real zeta_neighbor = (1.5)    * delta / Olen;
+                    if (iter > 0) { Olen  = ib_stability::bounded_obukhov_length(-ustar * ustar * ustar * theta / (kappa * ggg * tflux + tiny), Real(1.5) * delta); }
+                    Real zeta          = ib_stability::bounded_zeta(myhalf * delta, Olen);
+                    Real zeta_neighbor = ib_stability::bounded_zeta(Real(1.5) * delta, Olen);
 
                     // similarity functions
                     psi_m          = sfuns.calc_psi_m(zeta);
@@ -1308,10 +1354,10 @@ void ImmersedForcingBuildings_Scalar (const Box& bx,
                 }
 
                 // prevent some unphysical math
-                if (!(ustar > zero && !std::isnan(ustar))) { ustar = zero; }
-                if (!(ustar < 2.0  && !std::isnan(ustar))) { ustar = 2.0; }
-                if (psi_h_neighbor > std::log(1.5 * delta / z0)) { psi_h_neighbor = std::log(1.5 * delta / z0); }
-                if (psi_h > std::log(myhalf * delta / z0)) { psi_h = std::log(myhalf * delta / z0); }
+                ustar = ib_stability::clamped_ustar(ustar);
+                // caps of ln(z / z0), as above (erf-model/ERF#4134)
+                psi_h_neighbor = ib_stability::capped_psi(psi_h_neighbor, Real(1.5) * delta, z0, one);
+                psi_h = ib_stability::capped_psi(psi_h, myhalf * delta, z0, one);
 
                 // We do not know the actual temperature so use cell above
                 const Real thetastar    = theta * ustar * ustar / (kappa * ggg * Olen);

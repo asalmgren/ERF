@@ -252,7 +252,10 @@ fill_fab_from_arrays (int iv,
                       NC_Data_Dims_Type& NC_dim_type,
                       FAB& temp)
 {
-    int ns1, ns2, ns3; // bottom_top, south_north, west_east (these can be staggered or unstaggered)
+    // bottom_top, south_north, west_east (these can be staggered or unstaggered).
+    // Initialised because amrex::Abort is not [[noreturn]], so the compiler
+    // cannot tell that the final else never falls through.
+    int ns1 = 0, ns2 = 0, ns3 = 0;
     if (NC_dim_type == NC_Data_Dims_Type::Time_BT) {
         ns1 = nc_arrays[iv].get_vshape()[1];
         ns2 = 1;
@@ -280,7 +283,10 @@ fill_fab_from_arrays (int iv,
         // amrex::Print() << "TYPE SL " << ns1 << std::endl;
     }
     else {
-        amrex::Abort("Dont know this NC_Data_Dims_Type");
+        amrex::Abort("fill_fab_from_arrays: variable " + var_name +
+                     " has NC_Data_Dims_Type " + std::to_string(static_cast<int>(NC_dim_type)) +
+                     ", which this reader does not handle (only Time_BT, Time_SN_WE,"
+                     " Time_BT_SN_WE, Time_SL_SN_WE and Time_SL)");
     }
 
     // allow fewer z levels to be read in
@@ -345,6 +351,11 @@ fill_fab_from_arrays (int iv,
  * @param NC_dim_types NetCDF data dimension types
  * @param fab_vars Fab data we are to fill
  * @param success Success flags for each requested variable
+ * @param keep_on_host If true, leave each fab in the (pinned, on GPU) host memory it was
+ *                     broadcast into rather than copying it to the device.  Each fab spans
+ *                     the whole domain on every rank, so a caller that only uses it as the
+ *                     source of copies into its own MultiFabs should set this to avoid a
+ *                     full-domain device allocation per variable.
  */
 template<class FAB,typename DType>
 void
@@ -353,7 +364,8 @@ BuildFABsFromNetCDFFile (const amrex::Box& domain,
                          amrex::Vector<std::string> nc_var_names,
                          amrex::Vector<enum NC_Data_Dims_Type> NC_dim_types,
                          amrex::Vector<FAB*> fab_vars,
-                         amrex::Vector<int>& success)
+                         amrex::Vector<int>& success,
+                         bool keep_on_host = false)
 {
     int ioproc = amrex::ParallelDescriptor::IOProcessorNumber();  // I/O rank
 
@@ -394,6 +406,12 @@ BuildFABsFromNetCDFFile (const amrex::Box& domain,
             amrex::Box  fab_bx = tmp.box();
             amrex::Dim3 dom_lb = lbound(domain);
             fab_bx += amrex::IntVect(dom_lb.x,dom_lb.y,dom_lb.z);
+            if (keep_on_host) {
+                // Hand over the host buffer rather than copying it
+                *fab_vars[iv] = std::move(tmp);
+                fab_vars[iv]->shift(amrex::IntVect(dom_lb.x,dom_lb.y,dom_lb.z));
+                continue;
+            }
             // fab_vars points to data on device
             fab_vars[iv]->resize(fab_bx,1);
 #ifdef AMREX_USE_GPU

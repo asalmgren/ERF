@@ -2,31 +2,51 @@ name: ERF CI (sycl)
 
 on:
   push:
-    # branches: [development]
-    paths-ignore:
-      - Docs
-      - README.rst
-      - license.txt
+    branches: [development]
+    paths:
+      - '**'
+      - '!Docs/**'
+      - '!**.md'
+      - '!**.rst'
+      - '!license.txt'
+      - '!.github/workflows/**'
+      - '.github/workflows/sycl.yml'
+      - '.github/actions/**'
 
   pull_request:
     branches: [development]
-    types: [opened, synchronize, reopened, closed]
+    types: [opened, synchronize, reopened]
+    paths:
+      - '**'
+      - '!Docs/**'
+      - '!**.md'
+      - '!**.rst'
+      - '!license.txt'
+      - '!.github/workflows/**'
+      - '.github/workflows/sycl.yml'
+      - '.github/actions/**'
+  workflow_dispatch:
 
 concurrency:
-  group: ${{ github.event.pull_request.number || github.ref }}-${{ github.head_ref }}-sycl
-  cancel-in-progress: true
+  group: ${{ github.event.pull_request.number || github.ref }}-${{ github.head_ref || github.sha }}-sycl
+  cancel-in-progress: ${{ github.ref != 'refs/heads/development' }}
 
 jobs:
   Build-And-Test-SYCL:
-    # The closed event exists only to cancel in-progress runs via concurrency.
-    if: github.event.action != 'closed'
     name: oneAPI SYCL - Mesh ${{matrix.mesh_precision}} Particles ${{matrix.particles}} ${{matrix.particles_precision}}
     runs-on: ubuntu-24.04
+    timeout-minutes: 120
     strategy:
+      fail-fast: false
       matrix:
-        particles: [OFF, ON]
+        # GPU builds cover the particle-enabled configuration only. The
+        # particles-OFF variant costs a second long GPU compile for solver
+        # coverage the particles-ON build already provides; it is still built
+        # on CPU by ci, gcc and windows-mpi.
+        particles: [ON]
         particles_precision: [DOUBLE, SINGLE]
-        mesh_precision: [DOUBLE, SINGLE]
+        # PR tier: DOUBLE only. SINGLE builds on merge to development (which also writes its ccache).
+        mesh_precision: ${{ fromJSON(github.event_name == 'pull_request' && '["DOUBLE"]' || '["DOUBLE", "SINGLE"]') }}
         exclude:
           # Only matching mesh/particle precisions are tested, i.e. DOUBLE mesh
           # with DOUBLE particles and SINGLE mesh with SINGLE particles.
@@ -34,9 +54,6 @@ jobs:
             particles_precision: SINGLE
           - mesh_precision: SINGLE
             particles_precision: DOUBLE
-          # SINGLE precision is only exercised in the particle-enabled build.
-          - mesh_precision: SINGLE
-            particles: OFF
 
     steps:
 
@@ -55,21 +72,23 @@ jobs:
     - name: Install CCache
       run: Submodules/AMReX/.github/workflows/dependencies/dependencies_ccache.sh
 
-    - name: Set Up Cache
-      uses: actions/cache@v6
+    # ccache per matrix variant, written only from development; see ci.yml for how it works.
+    - name: Restore Cache
+      uses: actions/cache/restore@v6
       with:
         path: ~/.cache/ccache
-        key: ccache-${{ github.workflow }}-${{ github.job }}-git-${{ github.sha }}
+        key: ccache-${{ github.workflow }}-${{ github.job }}-${{ matrix.mesh_precision }}-git-${{ github.sha }}
         restore-keys: |
-             ccache-${{ github.workflow }}-${{ github.job }}-git-
+             ccache-${{ github.workflow }}-${{ github.job }}-${{ matrix.mesh_precision }}-git-
 
     - name: Build & Install
       run: |
         export CCACHE_COMPRESS=1
         export CCACHE_COMPRESSLEVEL=10
-        export CCACHE_MAXSIZE=250M
+        export CCACHE_MAXSIZE=150M
         export CCACHE_DEPEND=1
         ccache -z
+        build_start=$(date +%s)
 
         set +e
         source /opt/intel/oneapi/setvars.sh
@@ -89,20 +108,33 @@ jobs:
           -DERF_ENABLE_PARTICLES:BOOL=${{matrix.particles}} \
           -DERF_PRECISION:STRING=${{matrix.mesh_precision}} \
           -DERF_PARTICLES_PRECISION:STRING=${{matrix.particles_precision}} \
-          -DCMAKE_C_COMPILER=$(which icx) \
-          -DCMAKE_CXX_COMPILER=$(which icpx) \
+          -DCMAKE_C_COMPILER="$(which icx)" \
+          -DCMAKE_CXX_COMPILER="$(which icpx)" \
           -DCMAKE_CXX_STANDARD=17 \
           -DAMReX_PARALLEL_LINK_JOBS=4
         make -j 4 2>&1 | tee -a ${{runner.workspace}}/build-output.txt;
 
-        ccache -s
+        echo '```' >> "$GITHUB_STEP_SUMMARY"
+        # Keep only what this build used: ccache touches an object on every hit, so
+        # anything older than the build is stale. Without this the cache fills with
+        # objects from superseded commits, hits its cap, and evicts live objects.
+        ccache --evict-older-than "$(( $(date +%s) - build_start + 120 ))s"
+        ccache -s | tee -a "$GITHUB_STEP_SUMMARY"
+        echo '```' >> "$GITHUB_STEP_SUMMARY"
         du -hs ~/.cache/ccache
+
+    - name: Save Cache
+      if: always() && github.ref_name == github.event.repository.default_branch
+      uses: actions/cache/save@v6
+      with:
+        path: ~/.cache/ccache
+        key: ccache-${{ github.workflow }}-${{ github.job }}-${{ matrix.mesh_precision }}-git-${{ github.sha }}
 
     - name: Report
       run: |
         grep -Ei "warning:|error:" ${{runner.workspace}}/build-output.txt \
-          | grep -Ev "Submodules/(amrex|googletest)" | grep -Ev "lto-wrapper: warning:" | sort | uniq \
+          | grep -Ev "Submodules/(amrex|AMReX|googletest)" | grep -Ev "lto-wrapper: warning:" | sort | uniq \
           | awk 'BEGIN{i=0}{print $0}{i++}END{print "Warnings: "i}' > ${{runner.workspace}}/build-output-warnings.txt
         cat ${{runner.workspace}}/build-output-warnings.txt
-        export return=$(tail -n 1 ${{runner.workspace}}/build-output-warnings.txt | awk '{print $2}')
+        return=$(tail -n 1 ${{runner.workspace}}/build-output-warnings.txt | awk '{print $2}')
         exit ${return}

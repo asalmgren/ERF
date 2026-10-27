@@ -1,4 +1,9 @@
 
+    // On a mesh other than ConstantDz, heights come from z_cc and the vertical levels,
+    //    not from geomdata's prob_lo[2], prob_hi[2] and CellSize(2)
+    const Real phys_z_lo  = phys_zlo(geomdata, lev);
+    const Real phys_z_hi  = phys_zhi(geomdata, lev);
+
     ParmParse pp("prob");
 
     Real rho_0 = one; pp.query("rho_0", rho_0);
@@ -28,8 +33,10 @@
     Real pert_periods_V = amrex::Real(5.0); pp.query("pert_periods_V", pert_periods_V);
     Real pert_ref_height = amrex::Real(100.0); pp.query("pert_ref_height", pert_ref_height);
 
-    const Real* prob_lo = geomdata.ProbLo();
-    const Real* prob_hi = geomdata.ProbHi();
+    // Captured by value in the kernel below, so copy them out of geomdata rather than
+    // keeping pointers into host storage
+    const GpuArray<Real,AMREX_SPACEDIM> prob_lo{AMREX_D_DECL(geomdata.ProbLo(0), geomdata.ProbLo(1), geomdata.ProbLo(2))};
+    const GpuArray<Real,AMREX_SPACEDIM> prob_hi{AMREX_D_DECL(geomdata.ProbHi(0), geomdata.ProbHi(1), geomdata.ProbHi(2))};
 
     const bool use_eb = (sc.terrain_type == TerrainType::EB);
     const int klo = geomdata.Domain().smallEnd(2);
@@ -73,7 +80,7 @@
         // Define a point (xc,yc,zc) at the center of the domain
         const Real xc = myhalf * (prob_lo[0] + prob_hi[0]);
         const Real yc = myhalf * (prob_lo[1] + prob_hi[1]);
-        const Real zc = myhalf * (prob_lo[2] + prob_hi[2]);
+        const Real zc = myhalf * (phys_z_lo + phys_z_hi);
 
         const Real r  = std::sqrt((x-xc)*(x-xc) + (y-yc)*(y-yc) + (z-zc)*(z-zc));
 

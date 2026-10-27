@@ -11,14 +11,17 @@
 #include <AMReX_BoxArray.H>
 #include <AMReX_DistributionMapping.H>
 #include <AMReX_Geometry.H>
+#include <AMReX_iMultiFab.H>
 #include <AMReX_MultiFab.H>
 #include <AMReX_ParmParse.H>
 #include <AMReX_RealBox.H>
+#include <AMReX_Reduce.H>
 #include <AMReX_Utility.H>
 
 #include <gtest/gtest.h>
 
 #include "ERF_LandSurface.H"
+#include "../../ERF_GTestTempDir.H"
 #include "ERF_SLM.H"
 
 namespace {
@@ -44,6 +47,66 @@ void set_surface_temperature_gradient (LandSurface& land_surface,
             tsurf_arr(i, j, k) = base_temperature + i + 2.0 * j;
         });
     }
+}
+
+/**
+ * Marks alternating cells as land and non-land.
+ *
+ * Note that this (and the other device kernels here) must live outside the
+ * test bodies: nvcc rejects extended device lambdas in the protected TestBody
+ * member functions that the gtest macros generate.
+ */
+void set_checkerboard_landmask (amrex::iMultiFab& landmask)
+{
+    for (amrex::MFIter mfi(landmask, amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+        const amrex::Box& bx = mfi.validbox();
+        auto mask = landmask.array(mfi);
+        amrex::ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept {
+            mask(i, j, k) = ((i + j) % 2 == 0) ? 1 : 0;
+        });
+    }
+}
+
+/**
+ * Fills a vegetation and soil type pair with ramps of categories
+ * 1, 4, 7, 10, ... in x (vegetation) and in y (soil).
+ */
+void set_category_ramps (amrex::MultiFab& veg, amrex::MultiFab& soil)
+{
+    for (amrex::MFIter mfi(veg); mfi.isValid(); ++mfi) {
+        const amrex::Box box = mfi.validbox();
+        auto veg_arr  = veg.array(mfi);
+        auto soil_arr = soil.array(mfi);
+        amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept {
+            veg_arr (i, j, k) = amrex::Real(1 + 3*i);
+            soil_arr(i, j, k) = amrex::Real(1 + 3*j);
+        });
+    }
+}
+
+/**
+ * Returns the largest flux magnitude found at the non-land cells of a mask.
+ */
+amrex::Real max_flux_at_non_land_cells (const amrex::MultiFab& flux_mf,
+                                        const amrex::iMultiFab& landmask)
+{
+    amrex::ReduceOps<amrex::ReduceOpMax> reduce_op;
+    amrex::ReduceData<amrex::Real> reduce_data(reduce_op);
+    using ReduceTuple = typename decltype(reduce_data)::Type;
+
+    for (amrex::MFIter mfi(flux_mf, amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+        const amrex::Box& bx = mfi.validbox();
+        const auto flux = flux_mf.const_array(mfi);
+        const auto mask = landmask.const_array(mfi);
+        reduce_op.eval(bx, reduce_data,
+                       [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple {
+            return (mask(i, j, k) == 0) ? amrex::Math::abs(flux(i, j, k)) : amrex::Real(0.0);
+        });
+    }
+
+    amrex::Real max_flux = amrex::get<0>(reduce_data.value());
+    amrex::ParallelDescriptor::ReduceRealMax(max_flux);
+    return max_flux;
 }
 
 struct SLMTestState {
@@ -752,13 +815,7 @@ TEST_F(SLMInterfaceTest, AdvancesMixedLandAndNonLandCells)
     landmask[0][0] = std::make_unique<amrex::iMultiFab>(surface_box, lsm_dm, 1, amrex::IntVect(0));
     sst[0][0]->setVal(301.0);
 
-    for (amrex::MFIter mfi(*landmask[0][0], amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
-        auto mask = landmask[0][0]->array(mfi);
-        const auto& bx = mfi.validbox();
-        amrex::ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept {
-            mask(i, j, k) = ((i + j) % 2 == 0) ? 1 : 0;
-        });
-    }
+    set_checkerboard_landmask(*landmask[0][0]);
 
     amrex::MultiFab precip(surface_box, lsm_dm, 1, amrex::IntVect(0));
     precip.setVal(0.0);
@@ -774,16 +831,7 @@ TEST_F(SLMInterfaceTest, AdvancesMixedLandAndNonLandCells)
     ASSERT_FALSE(q_flux->contains_nan());
     ASSERT_FALSE(olen->contains_nan());
 
-    for (amrex::MFIter mfi(*t_flux, amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
-        const auto flux = t_flux->const_array(mfi);
-        const auto mask = landmask[0][0]->const_array(mfi);
-        const auto& bx = mfi.validbox();
-        amrex::Loop(bx, [=] (int i, int j, int k) noexcept {
-            if (mask(i, j, k) == 0) {
-                EXPECT_EQ(flux(i, j, k), amrex::Real(0.0));
-            }
-        });
-    }
+    EXPECT_EQ(max_flux_at_non_land_cells(*t_flux, *landmask[0][0]), amrex::Real(0.0));
 }
 
 TEST_F(SLMInterfaceTest, AcceptsNonIntegralAndRestartLikeTimes)
@@ -904,6 +952,47 @@ TEST_F(SLMInterfaceTest, TransfersRawInputStateFromLevelZero)
                 amrex::Real(3.0), amrex::Real(1.0e-12));
 }
 
+// Motivation: the vegetation and soil types are categories, and a fine level made from a
+// coarser one must get its coarse cell's category.  A linear interpolation gives values
+// between two categories, which SLM then truncates to a third (17, water, and 5 next to it
+// on a coastline become 12, cropland).
+TEST_F(SLMInterfaceTest, TransfersCategoriesPiecewiseConstant)
+{
+    initialize_multilevel(3, InitType::WRFInput);
+
+    // On level 1 (4 x 4) a ramp of categories 1, 4, 7, 10 in x for the vegetation type and
+    // in y for the soil type, which a limited linear interpolation would not flatten
+    auto* coarse_veg  = get_slm_data(land_surface, 1, "vegtype");
+    auto* coarse_soil = get_slm_data(land_surface, 1, "soiltype");
+    ASSERT_NE(coarse_veg, nullptr);
+    ASSERT_NE(coarse_soil, nullptr);
+    set_category_ramps(*coarse_veg, *coarse_soil);
+
+    land_surface.Initialize_From_Source(2, 1, amrex::IntVect(2),
+                                         LSMTransferMode::RawInput);
+
+    const auto* fine_veg  = get_slm_data(land_surface, 2, "vegtype");
+    const auto* fine_soil = get_slm_data(land_surface, 2, "soiltype");
+    ASSERT_NE(fine_veg, nullptr);
+    ASSERT_NE(fine_soil, nullptr);
+    int n_checked = 0;
+    for (amrex::MFIter mfi(*fine_veg); mfi.isValid(); ++mfi) {
+        const amrex::Box box = mfi.validbox();
+        const auto veg_arr  = fine_veg->const_array(mfi);
+        const auto soil_arr = fine_soil->const_array(mfi);
+        for (int k = box.smallEnd(2); k <= box.bigEnd(2); ++k) {
+        for (int j = box.smallEnd(1); j <= box.bigEnd(1); ++j) {
+        for (int i = box.smallEnd(0); i <= box.bigEnd(0); ++i) {
+            EXPECT_EQ(veg_arr (i, j, k), amrex::Real(1 + 3*(i/2))) << "at " << i << "," << j;
+            EXPECT_EQ(soil_arr(i, j, k), amrex::Real(1 + 3*(j/2))) << "at " << i << "," << j;
+            ++n_checked;
+        }
+        }
+        }
+    }
+    EXPECT_GT(n_checked, 0);
+}
+
 TEST_F(SLMInterfaceTest, TransfersProcessedStateFromLevelZero)
 {
     initialize_multilevel(2);
@@ -979,7 +1068,7 @@ TEST_F(SLMInterfaceTest, RemakePreservesProcessedState)
 TEST_F(SLMInterfaceTest, CheckpointWritesAndReadsSyntheticState)
 {
     const std::filesystem::path checkpoint =
-        std::filesystem::temp_directory_path() / "erf_slm_unit_checkpoint";
+        erf_gtest_temp_path("erf_slm_unit_checkpoint");
     std::filesystem::remove_all(checkpoint);
     std::filesystem::create_directories(checkpoint / "Level_0");
 
@@ -1006,7 +1095,7 @@ TEST_F(SLMInterfaceTest, CheckpointWritesAndReadsSyntheticState)
 TEST_F(SLMInterfaceTest, ReadsDirectSLMCheckpointIntoFreshSLM)
 {
     const std::filesystem::path checkpoint =
-        std::filesystem::temp_directory_path() / "erf_slm_unit_checkpoint_fresh";
+        erf_gtest_temp_path("erf_slm_unit_checkpoint_fresh");
     std::filesystem::remove_all(checkpoint);
     std::filesystem::create_directories(checkpoint / "Level_0");
 

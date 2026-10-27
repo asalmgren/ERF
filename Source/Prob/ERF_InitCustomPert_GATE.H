@@ -1,4 +1,10 @@
 
+    // On a mesh other than ConstantDz, heights come from z_cc and the vertical levels,
+    //    not from geomdata's prob_lo[2], prob_hi[2] and CellSize(2)
+    const bool use_z_phys = use_physical_z();
+    const Real phys_z_lo  = phys_zlo(geomdata, lev);
+    const Real phys_z_hi  = phys_zhi(geomdata, lev);
+
     ParmParse pp("prob");
 
     amrex::Real rho_0 = 0.0; pp.query("rho_0", rho_0);
@@ -36,28 +42,51 @@
         const Real* dx = geomdata.CellSize();
         const Real x = prob_lo[0] + (i + 0.5) * dx[0];
         const Real y = prob_lo[1] + (j + 0.5) * dx[1];
-        const Real z = prob_lo[2] + (k + 0.5) * dx[2];
+        const Real z = use_z_phys ? z_cc(i,j,k) : prob_lo[2] + (k + 0.5) * dx[2];
 
         // Define a point (xc,yc,zc) at the center of the domain
         const Real xc = 0.5 * (prob_lo[0] + prob_hi[0]);
         const Real yc = 0.5 * (prob_lo[1] + prob_hi[1]);
-        const Real zc = 0.5 * (prob_lo[2] + prob_hi[2]);
+        const Real zc = 0.5 * (phys_z_lo + phys_z_hi);
 
         const Real r  = std::sqrt((x-xc)*(x-xc) + (y-yc)*(y-yc) + (z-zc)*(z-zc));
 
-        // Add temperature perturbations -- we want to keep pressure constant
-        //     so these effectively end up as density perturbations
-        if ((z <= pert_ref_height) && (T_0_Pert_Mag != 0.0)) {
+        // Temperature and qv perturbations: the random ones (T_0_Pert_Mag, qv_0_Pert_Mag)
+        //     and the sinusoidal ones for regression tests (pert_deltaT, pert_deltaQV) are
+        //     summed, then applied once, so that turning on one does not discard the other
+        const bool rand_T  = (z <= pert_ref_height) && (T_0_Pert_Mag != 0.0);
+        const bool rand_qv = use_moisture && (z <= pert_ref_height) && (qv_0_Pert_Mag != 0.0);
+        const bool sin_T   = (pert_deltaT != 0.0);
+        const bool sin_qv  = use_moisture && (pert_deltaQV != 0.0);
 
+        // The random numbers are drawn in the same order as when each was applied on its own
+        Real dT  = 0.0;
+        Real dqv = 0.0;
+        if (rand_T) {
+            Real rand_double = amrex::Random(engine); // Between 0.0 and 1.0
+            dT += (rand_double*2.0 - 1.0)*T_0_Pert_Mag;
+        }
+        if (rand_qv) {
+            Real rand_double = amrex::Random(engine); // Between 0.0 and 1.0
+            dqv += (rand_double*2.0 - 1.0)*qv_0_Pert_Mag;
+        }
+        if (sin_T || sin_qv) {
+            const Real zl = z / pert_ref_height;
+            const Real damp = std::exp(-0.5 * zl * zl);
+            if (sin_T)  { dT  += tfac  * damp * z * std::cos(cval * (x - xc)); }
+            if (sin_qv) { dqv += qvfac * damp * z * std::cos(dval * (x - xc)); }
+        }
+
+        // We want to keep pressure constant, so the temperature perturbation
+        //     effectively ends up as a density perturbation
+        if (rand_T || sin_T) {
             Real rhotheta  = state(i,j,k,RhoTheta_comp);
             Real rho       = state(i,j,k,Rho_comp);
             Real qv        = state(i,j,k,RhoQ1_comp) / rho;
             Real Told      = getTgivenRandRTh(rho,rhotheta,qv);
             Real P         = getPgivenRTh(rhotheta,qv);
 
-            Real rand_double = amrex::Random(engine); // Between 0.0 and 1.0
-            Real Tpert    = (rand_double*2.0 - 1.0)*T_0_Pert_Mag;
-            Real Tnew     = Told + Tpert;
+            Real Tnew      = Told + dT;
 
             Real theta_new = getThgivenTandP(Tnew,P,rdOcp);
             Real rhonew    = getRhogivenThetaPress(theta_new,P,rdOcp,qv);
@@ -72,7 +101,7 @@
 
         // Set an initial value for KE
         if (custom_TKE) {
-            state_pert(i, j, k, RhoKE_comp) = (1.0 - z/prob_hi[2]) * r_hse(i,j,k);
+            state_pert(i, j, k, RhoKE_comp) = (1.0 - z/phys_z_hi) * r_hse(i,j,k);
         } else {
             state_pert(i, j, k, RhoKE_comp) = KE_0;
         }
@@ -80,53 +109,16 @@
         if (use_moisture) {
             state_pert(i, j, k, RhoQ1_comp) = 0.0;
             state_pert(i, j, k, RhoQ2_comp) = 0.0;
-            if ((z <= pert_ref_height) && (qv_0_Pert_Mag != 0.0))
+            if (rand_qv || sin_qv)
             {
+                // qv is perturbed on top of the density the temperature perturbation gave
                 Real rhoold = state(i,j,k,Rho_comp);
                 Real rhonew = rhoold + state_pert(i,j,k,Rho_comp);
 
                 Real qvold = state(i,j,k,RhoQ1_comp) / rhoold;
-
-                Real rand_double = amrex::Random(engine); // Between 0.0 and 1.0
-                Real qvnew = qvold + (rand_double*2.0 - 1.0)*qv_0_Pert_Mag;
+                Real qvnew = qvold + dqv;
 
                 state_pert(i, j, k, RhoQ1_comp) = rhonew * qvnew - rhoold * qvold;
             }
-        }
-
-        // sinusoidal variation of theta and qv for regression tests
-        if (pert_deltaT != 0.0)
-        {
-            const Real zl = z / pert_ref_height;
-            const Real damp = std::exp(-0.5 * zl * zl);
-
-            Real rhotheta  = state(i,j,k,RhoTheta_comp);
-            Real rho       = state(i,j,k,Rho_comp);
-            Real qv        = state(i,j,k,RhoQ1_comp) / rho;
-            Real Told      = getTgivenRandRTh(rho,rhotheta,qv);
-            Real P         = getPgivenRTh(rhotheta,qv);
-
-            Real Tpert    = tfac * damp * z * std::cos(cval * (x - xc));
-            Real Tnew     = Told + Tpert;
-
-            Real theta_new = getThgivenTandP(Tnew,P,rdOcp);
-            Real rhonew    = getRhogivenThetaPress(theta_new,P,rdOcp,qv);
-
-            state_pert(i, j, k, Rho_comp) = rhonew - rho;
-            state_pert(i, j, k, RhoTheta_comp) = 0.0;
-        }
-
-        if (use_moisture && pert_deltaQV != 0.0)
-        {
-            const Real zl = z / pert_ref_height;
-            const Real damp = std::exp(-0.5 * zl * zl);
-
-            Real rhoold = state(i,j,k,Rho_comp);
-            Real rhonew = rhoold + state_pert(i,j,k,Rho_comp);
-
-            Real qvold = state(i,j,k,RhoQ1_comp) / rhoold;
-            Real qvnew = qvold + qvfac * damp * z * std::cos(dval * (x - xc));
-
-            state_pert(i, j, k, RhoQ1_comp) = rhonew * qvnew - rhoold * qvold;
         }
     });

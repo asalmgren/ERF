@@ -8,18 +8,20 @@
 using namespace amrex;
 
 void
-WDM6::Init(const MultiFab& cons_in,
-           const BoxArray&,
-           const Geometry& geom,
-           const Real& dt_advance,
-           std::unique_ptr<MultiFab>& z_phys_nd,
-           std::unique_ptr<MultiFab>& detJ_cc)
+WDM6::Init (const MultiFab& cons_in,
+            const BoxArray&,
+            const Geometry& geom,
+            const Real& dt_advance,
+            std::unique_ptr<MultiFab>& z_phys_nd,
+            std::unique_ptr<MultiFab>& detJ_cc)
 {
     dt = dt_advance;
     m_geom = geom;
 
     m_z_phys_nd = z_phys_nd.get();
     m_detJ_cc = detJ_cc.get();
+
+    m_columns.define(cons_in.boxArray(), geom.Domain());
 
     // Read CCN concentration from input
     amrex::ParmParse pp("wdm6");
@@ -60,6 +62,9 @@ WDM6::Init(const MultiFab& cons_in,
         mic_fab_vars[ivar]->setVal(0.0);
     }
 
+    m_sed.define(cons_in.boxArray(), cons_in.DistributionMap(),
+                 {RhoQ3_comp, RhoQ4_comp, RhoQ5_comp, RhoQ6_comp, RhoQ9_comp});
+
     // Initialize nn to ccn0 / rho (matches WRF itimestep==1 behavior)
     // This must be done here so nn is available before the first microphysics call
     // NOTE: Can't write to cons_in (it's const), so only initialize mic_fab_vars.
@@ -82,14 +87,14 @@ WDM6::Init(const MultiFab& cons_in,
 }
 
 void
-WDM6::Copy_State_to_Micro(const MultiFab& cons_in)
+WDM6::Copy_State_to_Micro (const MultiFab& cons_in)
 {
     Copy_State_to_Micro(cons_in, nullptr);
 }
 
 void
-WDM6::Copy_State_to_Micro(const MultiFab& cons_in,
-                          const MultiFab* base_state)
+WDM6::Copy_State_to_Micro (const MultiFab& cons_in,
+                           const MultiFab* base_state)
 {
     assert_base_state_available(base_state);
     const bool use_anelastic_reference_pressure =
@@ -160,14 +165,14 @@ WDM6::Copy_State_to_Micro(const MultiFab& cons_in,
 }
 
 void
-WDM6::Update_Micro_Vars(MultiFab& cons_in,
+WDM6::Update_Micro_Vars (MultiFab& cons_in,
                          const MultiFab* base_state)
 {
     Copy_State_to_Micro(cons_in, base_state);
 }
 
 void
-WDM6::initialize_coeffs()
+WDM6::initialize_coeffs ()
 {
     using amrex::Real;
 

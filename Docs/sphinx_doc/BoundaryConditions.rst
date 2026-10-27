@@ -81,7 +81,10 @@ The ``foextrap`` type refers to "first order extrapolation" which sets all the g
 same value in the last valid cell/face. By contrast, ``hoextrap``, or "higher order extrapolation",
 does a linear extrapolation from the two nearest valid values. The ``neumann`` condition is an
 ERF-specific boundary type for a specified variable gradient. It is supported for theta on
-``slipwall`` and ``noslipwall`` faces and for density on compressible ``slipwall`` faces. The
+``slipwall`` and ``noslipwall`` faces and for density on compressible ``slipwall`` faces.
+On a terrain-fitted mesh, a scalar with ``foextrap`` at the bottom or top of the domain diffuses
+nothing through that face: the condition is taken as zero flux along the face normal, which on
+sloping terrain is not the same as a zero vertical gradient. The
 ``surface_layer`` condition is an ERF-specific
 boundary type that employs the above set of boundary conditions but also directly specifies the
 subgrid scale diffusive fluxes; see :ref:`sec:surface_layer` for more information.
@@ -132,6 +135,12 @@ the inputs below; note, that if the inflow file contains ``{z  u  v  w  theta}``
 below example should be modified to ``not`` include ``xlo.theta = <val>``.
 If ``theta`` is provided, it is by default the primitive variable, not the conserved quantity
 rho*theta. To specify rho*theta instead, ``xlo.read_prim_theta = false`` should be set.
+A primitive ``theta`` is converted to rho*theta with the density the face prescribes
+(``xlo.density``), or with the first interior cell's density when no density is given, on
+``inflow`` and ``inflow_outflow`` faces alike, so the inflow potential temperature the
+scheme sees is the file's value whatever the density ratio between the inflow and the
+interior. The file's theta applies only to the face that names the file; other inflow
+faces use their own ``theta``.
 
 ::
 
@@ -226,8 +235,12 @@ velocity on a domain boundary are set to the observational data and the RHS for 
 is assigned the BDY tendency. The user may specify (in the inputs file) the total
 width of the interior boundary region with ``erf.real_width = <Int>`` (yellow + blue).
 The real BCs are only imposed for :math:`\psi = \left\{ \theta; \; q_v; \; u; \; v \right\}`
-by default. For compressible ``WRFInput`` boundaries, setting
-``erf.use_wrf_bdy_density = true`` additionally uses the converted WRF dry-air
+by default, and for :math:`\rho` as well with ``WRFInput`` boundaries (below).
+In the lateral ghost cells, the density when it is not read, the passive
+scalars and the turbulent kinetic energy are extrapolated from the interior with
+zero gradient, and the moisture components not filled from WRF (see the
+hydrometeors below) are set to zero. For compressible ``WRFInput`` boundaries,
+``erf.use_wrf_bdy_density`` (true by default) uses the converted WRF dry-air
 density as the target for ``rho``, ``rho*theta``, and ``rho*qv`` and relaxes
 ``rho`` in the Davies zone. Pressure is still diagnosed from the ERF equation
 of state rather than directly nudged. This option is not supported for
@@ -289,7 +302,17 @@ ERF Boundary Data Files
 
 For real lateral boundary conditions, ``init_type`` of ``metgrid`` or ``wrfinput``, ERF can
 write lateral boundary data to an AMReX-native file during initialization. The file name is
-configurable with ``erf.erfbdy_file`` (default ``"erfbdy"``). Use of the the erfbdy file is
-mandatory for ``init_type`` of ``metgrid``, but can be optionally disabled for ``init_type``
-of ``wrfinput`` with ``erf.write_erfbdy = false`` so that the boundary data is processed
-as-needed during time integration.
+configurable with ``erf.erfbdy_file`` (default ``"erfbdy"``).
+
+Use of the erfbdy file is mandatory for ``init_type`` of ``metgrid``, which is why
+``erf.write_erfbdy`` defaults to true there.
+
+For ``init_type`` of ``wrfinput`` the boundary data are read from the ``erf.nc_bdy_file``
+named in the inputs file as they are needed during time integration, and an erfbdy file is
+neither written nor read unless it is asked for: set ``erf.write_erfbdy = true`` to write
+one during initialization, and ``erf.use_erfbdy = true`` on a later run to read the boundary
+data from it rather than from ``erf.nc_bdy_file``.
+
+An erfbdy file records the domain it was built for, and ERF aborts if that does not match
+the domain of the run reading it. ERF does not, however, verify which wrfbdy file the
+boundary data came from, so an erfbdy file must be rewritten if ``erf.nc_bdy_file`` changes.

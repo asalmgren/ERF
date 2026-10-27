@@ -1,6 +1,9 @@
 # ------------------  ERF + LSFIRE: fire heat and vapor fed back to ERF  -------------------
-# erf.fire_heat_feedback = true adds the fire fluxes to the bottom ERF cell every step:
-#   rho*theta += Q dt / (Cp_d dz),  rho*qv += E dt / dz   (dz = actual bottom-cell thickness).
+# erf.fire.coupling_type = lagged adds the fire fluxes to the bottom ERF cell
+# (erf.fire.heat_profile = bottom_cell), through the source term of the step after
+# the fire released them (ERF's one-step lag):
+#   d(rho*theta)/dt = Q / (Cp_d dz),  d(rho*qv)/dt = E / dz   (dz = actual bottom-cell thickness),
+# with E = latent / L_v the vapour mass flux LSFIRE computes.
 # No gravity here, so the heat stays in the bottom layer: the domain integrals close exactly.
 erf.prob_name = "ABL"
 max_step = 1200               # 600 s
@@ -10,7 +13,7 @@ geometry.is_periodic = 1 1 0
 zlo.type = "NoSlipWall"
 zhi.type = "SlipWall"
 erf.fixed_dt = 0.5            # ERF compressible stable dt is ~0.85 s at dx = 100 m
-erf.v = 2                     # prints applied heat power [W] and vapor [kg/s] every step
+erf.v = 2
 amr.v = 0
 amr.max_level = 0             # the fire couples to ERF level 0 only
 erf.check_int = -1            # fire restart is not supported yet
@@ -27,12 +30,18 @@ prob.U_0 = 4.89
 prob.V_0 = 0.0
 
 # ---- fire ----
-erf.fire_type = "ELMFIRE"
-erf.fire_met_source = "Atmosphere"
-erf.fire_heat_feedback = true
+erf.fire.enable = 1
+erf.fire.engine = lsfire
+fire.mode = "atmospheric"
+erf.fire.coupling_type = lagged
+# The LSFIRE coupling's heat placement: all of it in the bottom cell, without
+# the Exner factor (the shared coupling's defaults are exponential and on)
+erf.fire.heat_profile = bottom_cell
+erf.fire.heat_tendency_exner = false
+erf.fire.source_mode = add
 erf.moisture_model = "MoistNoCondensation"   # vapor is only transported (clean budget)
-fire.fire_ref_ratio = 10
-fire.fire_plot_file = "fire_plt"
+erf.fire.grid_ratio = 10
+erf.fire.plot_file = "fire_plt"
 fire.fuel_model_source = "uniform"
 fire.uniform_fuel_id = 102            # GR2
 fire.fuel_database_path = "fuel_models.csv"
@@ -50,4 +59,4 @@ fire.ignition_y = 1500.0
 fire.ignition_time = 0.0
 fire.cfl = 0.9
 fire.band_thickness = 5
-fire.verbosity = 1
+fire.verbosity = 2            # prints the heat each fire update releases [J]

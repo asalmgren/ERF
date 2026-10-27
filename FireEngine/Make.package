@@ -1,0 +1,21 @@
+# The LSFIRE (ELMFIRE-CPP) fire engine directory, for GNU make. ERF reads this
+# file when FIRE_HOME lists this directory (USE_FIRE = TRUE); FIRE_ENGINE_DIR is
+# the directory, already on VPATH and the include path.
+#
+#   ELMFIRE_DIR  LSFIRE (ELMFIRE-CPP_MPI) source directory: include/ELMFIRE_API.H, src/Core/FireHierarchy.H
+#   ELMFIRE_LIB  libelmfire_core.a, built against the same AMReX version as ERF
+ifeq ($(strip $(ELMFIRE_DIR)),)
+  $(error The lsfire engine needs ELMFIRE_DIR=<LSFIRE source dir>)
+endif
+ifeq ($(strip $(ELMFIRE_LIB)),)
+  $(error The lsfire engine needs ELMFIRE_LIB=<path to libelmfire_core.a>)
+endif
+
+CEXE_sources += ERF_FireELMFIRE.cpp
+CEXE_sources += ERF_FireReadFuel.cpp
+CEXE_sources += ERF_FireReadIgnition.cpp
+CEXE_headers += ERF_FireELMFIRE.H
+
+INCLUDE_LOCATIONS += $(ELMFIRE_DIR)/include $(ELMFIRE_DIR)/src
+# LSFIRE's AMReX symbols come from ERF's own AMReX (same version)
+LIBRARIES += $(ELMFIRE_LIB)

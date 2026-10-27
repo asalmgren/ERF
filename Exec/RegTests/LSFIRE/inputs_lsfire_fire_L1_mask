@@ -1,6 +1,6 @@
 # ------------------  ERF + LSFIRE: static fire L1 from a NetCDF refine mask  -------------------
 # Equivalent to LSFIRE examples/standalone_amr/inputs_two_disconnected_50_10m:
-#   ERF 60 x 30 x 4 @ 100 m; fire L0 = fire_ref_ratio 2 -> 120 x 60 @ 50 m; fire L1 ratio 5 -> 10 m.
+#   ERF 60 x 30 x 4 @ 100 m; fire L0 = erf.fire.grid_ratio 2 -> 120 x 60 @ 50 m; fire L1 ratio 5 -> 10 m.
 # The fire updates every 9 ERF steps of 0.5 s = 4.5 s = its own L0 step (0.9 * 50 m / 10 m/s).
 erf.prob_name = "ABL"
 max_step = 7200                 # 1 h
@@ -26,12 +26,13 @@ prob.T_0 = 300.0
 prob.U_0 = 0.0
 prob.V_0 = 0.0
 
-erf.fire_type = "ELMFIRE"
-erf.fire_met_source = "Constant"
-erf.fire_heat_feedback = false
-fire.fire_ref_ratio = 2
+erf.fire.enable = 1
+erf.fire.engine = lsfire
+fire.mode = "constant_wind"
+erf.fire.coupling_type = passive
+erf.fire.grid_ratio = 2
 fire.subcycle_interval = 9
-fire.fire_plot_file = "fire_plt"
+erf.fire.plot_file = "fire_plt"
 fire.cfl = 0.9
 fire.band_thickness = 5
 fire.fuel_model_source = "uniform"

@@ -1506,6 +1506,26 @@ ERF::InitData_post ()
     //
     if (restart_chkfile == "")
     {
+        // The loop above fills only physical and periodic ghost cells; the coarse/fine ghost cells
+        // of a level > 0 hold whatever the last fill during grid creation left there, and the
+        // projection reads them.  Fill them from the level below first, coarsest to finest (the
+        // fill at t_new reads vars_new only, since t_old is far in the past here).  The fill loop
+        // after the projection fills them again from the projected state.
+        bool any_projection = false;
+        for (int lev = 0; lev <= finest_level; ++lev) {
+            if (solverChoice.project_initial_velocity[lev] == 1) { any_projection = true; }
+        }
+        if (any_projection) {
+            for (int lev = 1; lev <= finest_level; ++lev)
+            {
+                auto& lev_new = vars_new[lev];
+                FillPatchFineLevel(lev, t_new[lev],
+                          {&lev_new[Vars::cons],&lev_new[Vars::xvel],&lev_new[Vars::yvel],&lev_new[Vars::zvel]},
+                          {&lev_new[Vars::cons],&rU_new[lev],&rV_new[lev],&rW_new[lev]},
+                          false);
+            }
+        }
+
         for (int lev = 0; lev <= finest_level; ++lev)
         {
             if (solverChoice.project_initial_velocity[lev] == 1) {

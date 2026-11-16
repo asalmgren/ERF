@@ -2057,6 +2057,21 @@ struct SolverChoice {
         // Are me transporting the scalar component?
         pp.queryAdd("transport_scalar",transport_scalar);
 
+        // A heavy gas (e.g. CO2) carried in the first passive scalar as rho_d * q_g, with its
+        // own gas constant in the equation of state and its mass in the density
+        {
+            amrex::ParmParse pp_hg("erf.heavy_gas");
+            pp_hg.queryAdd("enable", heavy_gas);
+            if (heavy_gas) {
+                pp_hg.get("R", R_g);
+                if (!(R_g > amrex::Real(0))) {
+                    amrex::Abort("erf.heavy_gas.R, the gas constant of the heavy gas [J/kg/K], must be positive");
+                }
+                RgoRd = R_g / R_d;
+                RgoRv = R_g / R_v;
+            }
+        }
+
         for (int lev = 0; lev <= max_level; ++lev) {
             if (turbChoice[lev].uses_eamxx_shoc()) {
                 use_eamxx_shoc = true;
@@ -3104,6 +3119,12 @@ struct SolverChoice {
     // Transport the passive scalar?
     bool transport_scalar = true;
 
+    // Is the first passive scalar a heavy gas (rho_d * q_g), and its gas constant [J/kg/K]
+    bool heavy_gas = false;
+    amrex::Real R_g = amrex::Real(0);
+    amrex::Real RgoRd = amrex::Real(0);
+    amrex::Real RgoRv = amrex::Real(0);
+
     // User wishes to output time averaged velocity fields
     bool time_avg_vel = false;
 
@@ -3667,6 +3688,14 @@ struct SolverChoice {
  * @brief Whether any level uses the native SHOC PBL scheme.
  * @var SolverChoice::transport_scalar
  * @brief Whether the passive scalar component is transported.
+ * @var SolverChoice::heavy_gas
+ * @brief Whether the first passive scalar is a heavy gas, rho_d * q_g (erf.heavy_gas.enable).
+ * @var SolverChoice::R_g
+ * @brief Gas constant of the heavy gas [J/kg/K] (erf.heavy_gas.R).
+ * @var SolverChoice::RgoRd
+ * @brief R_g / R_d, the factor of q_g in the equation of state.
+ * @var SolverChoice::RgoRv
+ * @brief R_g / R_v, which turns q_g into the vapour it is equivalent to in the equation of state.
  * @var SolverChoice::time_avg_vel
  * @brief Whether time-averaged velocity fields are output.
  * @var SolverChoice::pert_type

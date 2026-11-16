@@ -32,6 +32,8 @@ using namespace amrex;
  * @param[in]  beta_s_min    Lower bound of the spatially varying beta_s
  * @param[in]  beta_s_max    Upper bound of the spatially varying beta_s
  * @param[in]  phys_bc_type  Physical boundary condition types
+ * @param[in]  l_heavy_gas   Is the first passive scalar a heavy gas (erf.heavy_gas)?
+ * @param[in]  RgoRv         R_g / R_v of the heavy gas
  */
 
 void make_fast_coeffs (int /*level*/,
@@ -49,7 +51,8 @@ void make_fast_coeffs (int /*level*/,
                        const MultiFab* z_phys_nd,
                        bool use_variable_beta_s,
                        Real beta_s_min, Real beta_s_max,
-                       amrex::GpuArray<ERF_BC, AMREX_SPACEDIM*2> &phys_bc_type)
+                       amrex::GpuArray<ERF_BC, AMREX_SPACEDIM*2> &phys_bc_type,
+                       bool l_heavy_gas, Real RgoRv)
 {
     BL_PROFILE_VAR("make_fast_coeffs()",make_fast_coeffs);
 
@@ -149,6 +152,11 @@ void make_fast_coeffs (int /*level*/,
 
                 Real qv_p = (l_use_moisture) ? prim(i,j,k  ,PrimQ1_comp) : zero;
                 Real qv_q = (l_use_moisture) ? prim(i,j,k-1,PrimQ1_comp) : zero;
+                // A heavy gas enters the equation of state as the vapour it is equivalent to
+                if (l_heavy_gas) {
+                    qv_p = getQforEOS(qv_p, prim(i,j,k  ,PrimScalar_comp), RgoRv);
+                    qv_q = getQforEOS(qv_q, prim(i,j,k-1,PrimScalar_comp), RgoRv);
+                }
 
                 Real Thm_hi = stage_cons(i,j,k  ,RhoTheta_comp) * (one + RvoRd*qv_p);
                 Real Thm_lo = stage_cons(i,j,k-1,RhoTheta_comp) * (one + RvoRd*qv_q);
@@ -162,9 +170,13 @@ void make_fast_coeffs (int /*level*/,
                              -  Gamma * R_d * R_d * Thm_grad * myhalf * pi_stage_ca(i,j,k-1) /
                              (  c_v * stage_cons(i,j,k-1,RhoTheta_comp) );
 
-                if (l_use_moisture) {
-                    Real q = myhalf * ( prim(i,j,k,PrimQ1_comp) + prim(i,j,k-1,PrimQ1_comp)
-                                      + prim(i,j,k,PrimQ2_comp) + prim(i,j,k-1,PrimQ2_comp) );
+                if (l_use_moisture || l_heavy_gas) {
+                    Real q = (l_use_moisture) ? myhalf * ( prim(i,j,k,PrimQ1_comp) + prim(i,j,k-1,PrimQ1_comp)
+                                                         + prim(i,j,k,PrimQ2_comp) + prim(i,j,k-1,PrimQ2_comp) )
+                                              : zero;
+                    if (l_heavy_gas) {
+                        q += myhalf * ( prim(i,j,k,PrimScalar_comp) + prim(i,j,k-1,PrimScalar_comp) );
+                    }
                     coeff_P /= (one + q);
                     coeff_Q /= (one + q);
                 }
@@ -206,6 +218,11 @@ void make_fast_coeffs (int /*level*/,
 
                 Real qv_p = (l_use_moisture) ? prim(i,j,k  ,PrimQ1_comp) : zero;
                 Real qv_q = (l_use_moisture) ? prim(i,j,k-1,PrimQ1_comp) : zero;
+                // A heavy gas enters the equation of state as the vapour it is equivalent to
+                if (l_heavy_gas) {
+                    qv_p = getQforEOS(qv_p, prim(i,j,k  ,PrimScalar_comp), RgoRv);
+                    qv_q = getQforEOS(qv_q, prim(i,j,k-1,PrimScalar_comp), RgoRv);
+                }
 
                 Real Thm_hi = stage_cons(i,j,k  ,RhoTheta_comp) * (one + RvoRd*qv_p);
                 Real Thm_lo = stage_cons(i,j,k-1,RhoTheta_comp) * (one + RvoRd*qv_q);
@@ -219,9 +236,13 @@ void make_fast_coeffs (int /*level*/,
                              -  Gamma * R_d * R_d * Thm_grad * myhalf * pi_stage_ca(i,j,k-1) /
                              (  c_v * stage_cons(i,j,k-1,RhoTheta_comp) );
 
-                if (l_use_moisture) {
-                    Real q = myhalf * ( prim(i,j,k,PrimQ1_comp) + prim(i,j,k-1,PrimQ1_comp)
-                                      + prim(i,j,k,PrimQ2_comp) + prim(i,j,k-1,PrimQ2_comp) );
+                if (l_use_moisture || l_heavy_gas) {
+                    Real q = (l_use_moisture) ? myhalf * ( prim(i,j,k,PrimQ1_comp) + prim(i,j,k-1,PrimQ1_comp)
+                                                         + prim(i,j,k,PrimQ2_comp) + prim(i,j,k-1,PrimQ2_comp) )
+                                              : zero;
+                    if (l_heavy_gas) {
+                        q += myhalf * ( prim(i,j,k,PrimScalar_comp) + prim(i,j,k-1,PrimScalar_comp) );
+                    }
                     coeff_P /= (one + q);
                     coeff_Q /= (one + q);
                 }

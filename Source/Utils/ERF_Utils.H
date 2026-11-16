@@ -106,6 +106,13 @@ void
 make_qt (const amrex::MultiFab& cons_state, amrex::MultiFab& qt, int n_qstate_into_total);
 
 /**
+ * Put the heavy gas (erf.heavy_gas), rho_d q_g in the first passive scalar, into qt, the mixing
+ * ratio that weights the density and the inertia: qt = q_water + q_g, or qt = q_g in a dry run
+ */
+void
+add_heavy_gas_to_qt (const amrex::MultiFab& cons_state, amrex::MultiFab& qt, bool qt_holds_water);
+
+/**
  * Average down a cell-centred state over immersed-forcing levels (erf.if_average_down =
  * fluid_mass). The fine cells are weighted by their fluid mass,
  * (rho S)_c = rho_c * sum (1 - beta_f) V_f (rho S)_f / sum (1 - beta_f) V_f rho_f,

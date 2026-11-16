@@ -84,6 +84,9 @@
             int n_qstate_into_total = micro->Get_Qstate_Moist_Size() - micro->Get_Qstate_Moist_NumConc_Size();
             make_qt(S_data[IntVars::cons], qt, n_qstate_into_total);
         }
+        if (solverChoice.heavy_gas) {
+            add_heavy_gas_to_qt(S_data[IntVars::cons], qt, solverChoice.moisture_type != MoistureType::None);
+        }
 
         MultiFab p0_to_use, base_to_use;
         MultiFab *zpn_to_use, *zpc_to_use, *ax_to_use, *ay_to_use, *az_to_use, *dJ_to_use;

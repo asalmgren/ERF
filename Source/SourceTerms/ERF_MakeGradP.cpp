@@ -133,6 +133,8 @@ void make_gradp_pert (int level,
                       Vector<MultiFab>& gradp)
 {
     const bool l_use_moisture  = (solverChoice.moisture_type != MoistureType::None);
+    const bool l_heavy_gas     = solverChoice.heavy_gas;
+    const Real RgoRv           = solverChoice.RgoRv;
     const bool l_eb_terrain    = (solverChoice.terrain_type == TerrainType::EB);
 
     const bool l_use_pert_pres = (solverChoice.use_pert_pres_gradient);
@@ -176,6 +178,9 @@ void make_gradp_pert (int level,
             ParallelFor(gbx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
             {
                 Real qv_for_p = (l_use_moisture) ? cell_data(i,j,k,RhoQ1_comp)/cell_data(i,j,k,Rho_comp) : zero;
+                if (l_heavy_gas) {
+                    qv_for_p = getQforEOS(qv_for_p, cell_data(i,j,k,RhoScalar_comp)/cell_data(i,j,k,Rho_comp), RgoRv);
+                }
                 pp_arr(i,j,k) = getPgivenRTh(cell_data(i,j,k,RhoTheta_comp),qv_for_p);
             });
         }
@@ -212,7 +217,7 @@ void make_gradp_pert (int level,
                 const Array4<      Real>& rp_arr    = rhopert.array(mfi);
                 ParallelFor(gbx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
                 {
-                    Real qt_loc = (l_use_moisture) ? qt_arr(i,j,k) : zero;
+                    Real qt_loc = (l_use_moisture || l_heavy_gas) ? qt_arr(i,j,k) : zero;
                     rp_arr(i,j,k) = cell_data(i,j,k,Rho_comp) * (one + qt_loc)
                                   - base_arr(i,j,k,BaseState::r0_comp)
                                   * (one + base_arr(i,j,k,BaseState::qv0_comp));

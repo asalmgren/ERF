@@ -170,6 +170,8 @@ void erf_slow_rhs_pre (int level, int finest_level,
                                      solverChoice.vert_implicit_fac[level][nrk] : zero;
 
     const bool l_use_moisture  = (solverChoice.moisture_type != MoistureType::None);
+    // qt (water and a heavy gas) weights the inertia
+    const bool l_use_qt        = l_use_moisture || solverChoice.heavy_gas;
 
     auto any_SurfLayer = [&SurfLayer_ = SurfLayer]() -> bool {
         for (auto it = SurfLayer_.begin(); it != SurfLayer_.end(); it++)
@@ -857,7 +859,7 @@ void erf_slow_rhs_pre (int level, int finest_level,
 
             // Note that gradp arrays now carry the map factor in them
 
-            Real q = (l_use_moisture) ? myhalf * (qt_arr(i,j,k) + qt_arr(i-1,j,k)) : zero;
+            Real q = (l_use_qt) ? myhalf * (qt_arr(i,j,k) + qt_arr(i-1,j,k)) : zero;
 
             rho_u_rhs(i, j, k) += (-gpx_arr(i,j,k) - abl_pressure_grad[0]) / (one + q) + xmom_src_arr(i,j,k);
 
@@ -876,7 +878,7 @@ void erf_slow_rhs_pre (int level, int finest_level,
 
             // Note that gradp arrays now carry the map factor in them
 
-            Real q = (l_use_moisture) ? myhalf * (qt_arr(i,j,k) + qt_arr(i,j-1,k)) : zero;
+            Real q = (l_use_qt) ? myhalf * (qt_arr(i,j,k) + qt_arr(i,j-1,k)) : zero;
 
             rho_v_rhs(i, j, k) += (-gpy_arr(i,j,k) - abl_pressure_grad[1]) / (one + q) + ymom_src_arr(i,j,k);
 
@@ -959,7 +961,7 @@ void erf_slow_rhs_pre (int level, int finest_level,
             Real gpz = gpz_arr(i,j,k);
 
             rho_w_rhs(i, j, k) += slow_rhs_pre_z_pressure_buoyancy(
-                qt_arr, i, j, k, l_use_moisture, gpz, abl_pressure_grad[2],
+                qt_arr, i, j, k, l_use_qt, gpz, abl_pressure_grad[2],
                 buoyancy_arr(i,j,k)) + zmom_src_arr(i,j,k);
 
             if (l_moving_terrain) {

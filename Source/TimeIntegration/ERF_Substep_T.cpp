@@ -64,6 +64,8 @@ cf_omega_stage (int i, int j, int k, int klo, int khi,
  * @param[in   ] beta_d divergence damping coefficient: how far (rho theta) is projected forward
  * @param[inout] cf_fluxes coarse/fine face fluxes: recorded here on a coarse level, imposed on a fine one
  * @param[in   ] lateral_walls whether the xlo, xhi, ylo and yhi faces are walls (zero normal velocity)
+ * @param[in   ] l_heavy_gas is the first passive scalar a heavy gas (erf.heavy_gas)?
+ * @param[in   ] RgoRd R_g / R_d of the heavy gas
  */
 
 void erf_substep_T (int step, int /*nrk*/,
@@ -100,7 +102,8 @@ void erf_substep_T (int step, int /*nrk*/,
                     const Real l_damp_coef,
                     const Real beta_d,
                     const CFFaceFluxes& cf_fluxes,
-                    const GpuArray<bool,4>& lateral_walls)
+                    const GpuArray<bool,4>& lateral_walls,
+                    bool l_heavy_gas, Real RgoRd)
 {
     BL_PROFILE_REGION("erf_substep_T()");
 
@@ -265,7 +268,9 @@ void erf_substep_T (int step, int /*nrk*/,
             // Convert to Theta_m
             // NOTE: qv is not changing over the fast steps so we use the stage data
             Real qv = (l_use_moisture) ? prim(i,j,k,PrimQ1_comp) : zero;
-            theta_extrap(i,j,k) *= (one + RvOverRd*qv);
+            Real fac = one + RvOverRd*qv;
+            if (l_heavy_gas) { fac += RgoRd * prim(i,j,k,PrimScalar_comp); }
+            theta_extrap(i,j,k) *= fac;
 
             // Save Theta^{'',n-1} for theta extrap next substep
             lagged_arr(i,j,k) = old_drho_theta(i,j,k);
@@ -351,7 +356,7 @@ void erf_substep_T (int step, int /*nrk*/,
 
                 gpx *= mf_ux(i,j,0);
 
-                Real q = (l_use_moisture) ? myhalf * (qt_arr(i,j,k) + qt_arr(i-1,j,k)) : zero;
+                Real q = (l_use_moisture || l_heavy_gas) ? myhalf * (qt_arr(i,j,k) + qt_arr(i-1,j,k)) : zero;
 
                 Real pi_c =  myhalf * (pi_stage_ca(i-1,j,k,0) + pi_stage_ca(i  ,j,k,0));
                 Real fast_rhs_rho_u = -Gamma * R_d * pi_c * gpx / (one + q);
@@ -393,7 +398,7 @@ void erf_substep_T (int step, int /*nrk*/,
 
                 gpy *= mf_vy(i,j,0);
 
-                Real q = (l_use_moisture) ? myhalf * (qt_arr(i,j,k) + qt_arr(i,j-1,k)) : zero;
+                Real q = (l_use_moisture || l_heavy_gas) ? myhalf * (qt_arr(i,j,k) + qt_arr(i,j-1,k)) : zero;
 
                 Real pi_c =  myhalf * (pi_stage_ca(i,j-1,k,0) + pi_stage_ca(i,j  ,k,0));
                 Real fast_rhs_rho_v = -Gamma * R_d * pi_c * gpy / (one + q);

@@ -67,6 +67,7 @@ void erf_substep_NS (int step, int nrk, int level, int finest_level,
                      const amrex::Real l_damp_coef,
                      const amrex::Real beta_d,
                      const CFFaceFluxes& cf_fluxes,
+                     bool l_heavy_gas, amrex::Real RgoRd,
                      amrex::MultiFab* mom_reflux_p,
                      const amrex::GpuArray<bool,4>& lateral_walls);
 
@@ -105,7 +106,8 @@ void erf_substep_T (int step, int nrk, int level, int finest_level,
                     const amrex::Real l_damp_coef,
                     const amrex::Real beta_d,
                     const CFFaceFluxes& cf_fluxes,
-                    const amrex::GpuArray<bool,4>& lateral_walls);
+                    const amrex::GpuArray<bool,4>& lateral_walls,
+                    bool l_heavy_gas, amrex::Real RgoRd);
 
 /**
  * Function for computing the fast RHS with moving terrain
@@ -172,6 +174,7 @@ void make_fast_coeffs (int level,
                        const bool use_variable_beta_s,
                        const amrex::Real beta_s_min,
                        const amrex::Real beta_s_max,
-                       amrex::GpuArray<ERF_BC, AMREX_SPACEDIM*2> &phys_bc_type);
+                       amrex::GpuArray<ERF_BC, AMREX_SPACEDIM*2> &phys_bc_type,
+                       bool l_heavy_gas, amrex::Real RgoRv);
 
 #endif

@@ -19,10 +19,15 @@
           const Array4<      Real>& pi_stage_arr = pi_stage.array(mfi);
           const Real rdOcp = solverChoice.rdOcp;
           const bool l_use_moisture  = (solverChoice.moisture_type != MoistureType::None);
+          const bool l_heavy_gas     = solverChoice.heavy_gas;
+          const Real RgoRv           = solverChoice.RgoRv;
 
           amrex::ParallelFor(gbx1, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
           {
               auto qv_for_p = (l_use_moisture) ? cons_arr(i,j,k,RhoQ1_comp)/cons_arr(i,j,k,Rho_comp) : zero;
+              if (l_heavy_gas) {
+                  qv_for_p = getQforEOS(qv_for_p, cons_arr(i,j,k,RhoScalar_comp)/cons_arr(i,j,k,Rho_comp), RgoRv);
+              }
               pi_stage_arr(i,j,k) = getExnergivenRTh(cons_arr(i,j,k,RhoTheta_comp), rdOcp, qv_for_p);
           });
 
@@ -34,6 +39,9 @@
               amrex::ParallelFor(gbx1, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
               {
                   auto qv_for_p = (l_use_moisture) ? cons_arr(i,j,k,RhoQ1_comp)/cons_arr(i,j,k,Rho_comp) : zero;
+                  if (l_heavy_gas) {
+                      qv_for_p = getQforEOS(qv_for_p, cons_arr(i,j,k,RhoScalar_comp)/cons_arr(i,j,k,Rho_comp), RgoRv);
+                  }
                   p_stage_arr(i,j,k) = getPgivenRTh(cons_arr(i,j,k,RhoTheta_comp), qv_for_p);
               });
           }

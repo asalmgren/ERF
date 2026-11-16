@@ -183,5 +183,22 @@ amrex::Real compute_vapor_pressure (const amrex::Real p_s, const amrex::Real RH)
     return p_s*RH;
 }
 
+/**
+ * The mixing ratio to give the functions above as qv so that they also count a heavy gas
+ * (erf.heavy_gas) of mixing ratio qg and gas constant R_g: their factor (1 + R_v/R_d qv)
+ * becomes 1 + R_v/R_d qv + R_g/R_d qg, which is p = rho_d (R_d + R_v qv + R_g qg) T.
+ *
+ * @param[in] qv    water vapor mixing ratio
+ * @param[in] qg    heavy-gas mixing ratio, rho_g / rho_d
+ * @param[in] RgoRv R_g / R_v
+ */
+AMREX_GPU_HOST_DEVICE
+AMREX_FORCE_INLINE
+amrex::Real
+getQforEOS (const amrex::Real qv, const amrex::Real qg, const amrex::Real RgoRv)
+{
+    return qv + RgoRv * qg;
+}
+
 #endif
 

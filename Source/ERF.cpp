@@ -4238,6 +4238,39 @@ ERF::ReadParameters ()
         }
     }
 
+    // A heavy gas in the first passive scalar is in the equation of state, the density and the
+    // inertia of the fully compressible terrain-fitted (or flat) path with buoyancy_type 1 only
+    if (solverChoice.heavy_gas) {
+        for (int lev = 0; lev <= max_level; ++lev) {
+            if (solverChoice.compressibility_type[lev] != CompressibilityType::FullyCompressible) {
+                amrex::Abort("erf.heavy_gas needs erf.compressibility_type = FullyCompressible at every level");
+            }
+            if (solverChoice.buoyancy_type[lev] != 1) {
+                amrex::Abort("erf.heavy_gas needs erf.buoyancy_type = 1 (the density departure) at every level");
+            }
+            if (solverChoice.timestepping_type[lev] != TimesteppingType::RK3_ImplicitSubstep) {
+                amrex::Abort("erf.heavy_gas needs erf.timestepping_type = RK3_ImplicitSubstep at every level");
+            }
+        }
+        if (solverChoice.moisture_type != MoistureType::None) {
+            amrex::Abort("erf.heavy_gas is not supported with moisture: the microphysics does not see the gas");
+        }
+        if (solverChoice.terrain_type != TerrainType::None &&
+            solverChoice.terrain_type != TerrainType::StaticFittedMesh) {
+            amrex::Abort("erf.heavy_gas needs erf.terrain_type = None or StaticFittedMesh");
+        }
+        if (!solverChoice.transport_scalar) {
+            amrex::Abort("erf.heavy_gas needs erf.transport_scalar = true: the gas is the first passive scalar");
+        }
+        if (m_mass_source) {
+            amrex::Abort("erf.heavy_gas with erf.mass_source is not implemented yet: the source injects dry air");
+        }
+        amrex::Print() << "HEAVY GAS: the first passive scalar (rhoadv_0) is rho_d * q_g of a gas with R = "
+                       << solverChoice.R_g << " J/kg/K (R/R_d = " << solverChoice.RgoRd
+                       << "); it is in the equation of state, the density and the inertia. A restart must "
+                       << "set erf.heavy_gas.* again, or the gas becomes a passive tracer." << std::endl;
+    }
+
     // SurfaceModel output is opt-in for single-provider runs.  When both
     // providers are active, retain the useful combined diagnostic output
     // by default, while allowing an explicit false to disable it.

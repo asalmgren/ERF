@@ -136,16 +136,23 @@ ERF::momentum_reflux_add_slow (int /*lev*/, MultiFab& P, const MultiFab& cons, c
 #ifdef _OPENMP
 #pragma omp parallel if (Gpu::notInLaunchRegion())
 #endif
+    // A heavy gas (erf.heavy_gas) is in qt and in the equation of state
+    const bool l_heavy_gas = solverChoice.heavy_gas;
+    const Real RgoRv       = solverChoice.RgoRv;
+    const bool l_use_qt    = moist || l_heavy_gas;
     for (MFIter mfi(P, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
         const Box& bx = mfi.tilebox();
         const Array4<Real>&       p_arr  = P.array(mfi);
         const Array4<const Real>& c_arr  = cons.const_array(mfi);
         const Array4<const Real>& p0_arr = p0.const_array(mfi);
-        const Array4<const Real>& qt_arr = (moist) ? qt.const_array(mfi) : Array4<const Real>{};
+        const Array4<const Real>& qt_arr = (l_use_qt) ? qt.const_array(mfi) : Array4<const Real>{};
         ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
         {
             Real qv = (moist) ? c_arr(i,j,k,RhoQ1_comp) / c_arr(i,j,k,Rho_comp) : zero;
-            Real q  = (moist) ? qt_arr(i,j,k) : zero;
+            if (l_heavy_gas) {
+                qv = getQforEOS(qv, c_arr(i,j,k,RhoScalar_comp) / c_arr(i,j,k,Rho_comp), RgoRv);
+            }
+            Real q  = (l_use_qt) ? qt_arr(i,j,k) : zero;
             Real pp = getPgivenRTh(c_arr(i,j,k,RhoTheta_comp), qv) - p0_arr(i,j,k);
             p_arr(i,j,k) += dt_stage * pp / (one + q);
         });

@@ -155,7 +155,7 @@ auto acoustic_substepping_fun = [&,one_d=one,zero_d=zero](int fast_step, int n_s
                              (l_moving_mesh ? detJ_cc_new[level] : detJ_cc[level]), dtau, beta_s,
                              z_phys_nd[level].get(),
                              l_variable_beta_s, solverChoice.beta_s_min, solverChoice.beta_s_max,
-                             phys_bc_type);
+                             phys_bc_type, solverChoice.heavy_gas, solverChoice.RgoRv);
         }
 
         bool l_rayleigh_implicit = solverChoice.rayleigh_implicit_w(level);
@@ -237,7 +237,8 @@ auto acoustic_substepping_fun = [&,one_d=one,zero_d=zero](int fast_step, int n_s
                           mapfac[level],
                           fr_as_crse, fr_as_fine, l_use_moisture, l_reflux, solverChoice.use_real_bcs,
                           (l_rayleigh_implicit) ? d_sinesq_stag_ptrs[level].data() : nullptr, l_damp_coef,
-                          solverChoice.beta_d, cf_fluxes, lateral_walls);
+                          solverChoice.beta_d, cf_fluxes, lateral_walls,
+                          solverChoice.heavy_gas, solverChoice.RgoRd);
 
         } else {
 
@@ -250,6 +251,7 @@ auto acoustic_substepping_fun = [&,one_d=one,zero_d=zero](int fast_step, int n_s
                            fr_as_crse, fr_as_fine, l_use_moisture, l_reflux, solverChoice.use_real_bcs,
                            (l_rayleigh_implicit) ? d_sinesq_stag_ptrs[level].data() : nullptr, l_damp_coef,
                            solverChoice.beta_d, cf_fluxes,
+                           solverChoice.heavy_gas, solverChoice.RgoRd,
                            (l_reflux) ? momentum_reflux_pressure(level) : nullptr, lateral_walls);
         }
 

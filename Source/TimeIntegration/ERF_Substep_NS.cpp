@@ -40,6 +40,8 @@ using namespace amrex;
  * @param[in   ]  l_reflux should we add fluxes to the FluxRegisters?
  * @param[in   ]  l_real_bc
  * @param[inout]  cf_fluxes coarse/fine face fluxes: recorded here on a coarse level, imposed on a fine one
+ * @param[in   ]  l_heavy_gas is the first passive scalar a heavy gas (erf.heavy_gas)?
+ * @param[in   ]  RgoRd R_g / R_d of the heavy gas
  * @param[inout]  mom_reflux_p if not null, the sum of the pressure the horizontal momenta see, added to (ERF_MomentumReflux.cpp)
  * @param[in   ]  lateral_walls whether the xlo, xhi, ylo and yhi faces are walls (zero normal velocity)
  */
@@ -77,6 +79,7 @@ void erf_substep_NS (int step, int nrk,
                      const Real l_damp_coef,
                      const Real beta_d,
                      const CFFaceFluxes& cf_fluxes,
+                     bool l_heavy_gas, Real RgoRd,
                      MultiFab* mom_reflux_p,
                      const GpuArray<bool,4>& lateral_walls)
 {
@@ -192,7 +195,9 @@ void erf_substep_NS (int step, int nrk,
 
             // NOTE: qv is not changing over the fast steps so we use the stage data
             Real qv = (l_use_moisture) ? prim(i,j,k,PrimQ1_comp) : zero;
-            theta_extrap(i,j,k) *= (one + RvoRd*qv);
+            Real fac = one + RvoRd*qv;
+            if (l_heavy_gas) { fac += RgoRd * prim(i,j,k,PrimScalar_comp); }
+            theta_extrap(i,j,k) *= fac;
 
             // We define lagged_delta_rt for our next step as the current delta_rt
             // (after using it above to extrapolate theta for this step)
@@ -207,7 +212,7 @@ void erf_substep_NS (int step, int nrk,
             const Array4<const Real>& qt_arr   = qt.const_array(mfi);
             ParallelFor(mfi.tilebox(), [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
             {
-                Real q = (l_use_moisture) ? qt_arr(i,j,k) : zero;
+                Real q = (l_use_moisture || l_heavy_gas) ? qt_arr(i,j,k) : zero;
                 p_reflux(i,j,k) += dtau * Gamma * R_d * pi_arr(i,j,k,0) * theta_extrap(i,j,k) / (one + q);
             });
         }
@@ -317,7 +322,7 @@ void erf_substep_NS (int step, int nrk,
                   (theta_extrap(i,j,k) - theta_extrap(i-1,j,k))*dxi;
                 gpx *= mf_ux(i,j,0);
 
-                Real q = (l_use_moisture) ? myhalf * (qt_arr(i,j,k) + qt_arr(i-1,j,k)) : zero;
+                Real q = (l_use_moisture || l_heavy_gas) ? myhalf * (qt_arr(i,j,k) + qt_arr(i-1,j,k)) : zero;
 
                 Real pi_c =  myhalf * (pi_stage_ca(i-1,j,k,0) + pi_stage_ca(i,j,k,0));
                 Real fast_rhs_rho_u = -Gamma * R_d * pi_c * gpx / (one + q);
@@ -339,7 +344,7 @@ void erf_substep_NS (int step, int nrk,
                   (theta_extrap(i,j,k) - theta_extrap(i,j-1,k))*dyi;
                 gpy *= mf_vy(i,j,0);
 
-                Real q = (l_use_moisture) ? myhalf * (qt_arr(i,j,k) + qt_arr(i,j-1,k)) : zero;
+                Real q = (l_use_moisture || l_heavy_gas) ? myhalf * (qt_arr(i,j,k) + qt_arr(i,j-1,k)) : zero;
 
                 Real pi_c =  myhalf * (pi_stage_ca(i,j-1,k,0) + pi_stage_ca(i,j,k,0));
                 Real fast_rhs_rho_v = -Gamma * R_d * pi_c * gpy / (one + q);

@@ -124,6 +124,31 @@ make_qt (const MultiFab& cons_state, MultiFab& qt, int n_qstate_into_total)
 }
 
 /**
+ * Put the heavy gas, rho_d q_g in the first passive scalar, into the mixing ratio qt that weights
+ * the density and the inertia.
+ *
+ * @param[in] cons_state MultiFab containing conservative state variables
+ * @param[inout] qt mixing ratio of everything but dry air, over its valid and ghost cells
+ * @param[in] qt_holds_water whether qt already holds the water (make_qt); if not, it is set
+ */
+void
+add_heavy_gas_to_qt (const MultiFab& cons_state, MultiFab& qt, bool qt_holds_water)
+{
+    BL_PROFILE("add_heavy_gas_to_qt()");
+
+    for (MFIter mfi(qt, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+        const Box& gbx = mfi.growntilebox(qt.nGrowVect());
+        const Array4<const Real>& c = cons_state.const_array(mfi);
+        const Array4<      Real>& q = qt.array(mfi);
+        ParallelFor(gbx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+        {
+            const Real qg = c(i,j,k,RhoScalar_comp) / c(i,j,k,Rho_comp);
+            q(i,j,k) = (qt_holds_water) ? q(i,j,k) + qg : qg;
+        });
+    }
+}
+
+/**
  * Fluid-mass-weighted average down over immersed-forcing levels (see ERF_Utils.H).
  */
 void

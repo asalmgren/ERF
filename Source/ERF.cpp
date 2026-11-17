@@ -4210,7 +4210,7 @@ ERF::ReadParameters ()
 
     solverChoice.init_params(max_level,pp_prefix);
 
-    m_mass_source = MassSource::from_inputs();
+    m_mass_source = MassSource::from_inputs(solverChoice.heavy_gas);
     if (m_mass_source) {
         for (int lev = 0; lev <= max_level; ++lev) {
             if (solverChoice.compressibility_type[lev] != CompressibilityType::FullyCompressible) {
@@ -4261,9 +4261,6 @@ ERF::ReadParameters ()
         }
         if (!solverChoice.transport_scalar) {
             amrex::Abort("erf.heavy_gas needs erf.transport_scalar = true: the gas is the first passive scalar");
-        }
-        if (m_mass_source) {
-            amrex::Abort("erf.heavy_gas with erf.mass_source is not implemented yet: the source injects dry air");
         }
         amrex::Print() << "HEAVY GAS: the first passive scalar (rhoadv_0) is rho_d * q_g of a gas with R = "
                        << solverChoice.R_g << " J/kg/K (R/R_d = " << solverChoice.RgoRd

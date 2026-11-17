@@ -3501,7 +3501,27 @@ as CO\ :sub:`2` (molecular weight 1.52 times that of air), therefore gets no buo
 from its molecular weight; a density excess comes only from a low ``theta``. Setting
 :math:`\theta_{src} = \theta \, M_{air} / M_{gas}` (about 197 K for CO\ :sub:`2` in
 300 K air) gives the density of the mixture under adiabatic mixing, but the
-temperature of the gas is then not the physical one.
+temperature of the gas is then not the physical one. To release a gas with its own
+gas constant, use ``erf.heavy_gas`` (see :ref:`sec:HeavyGas`): with it on, a fraction
+``erf.mass_source.gas_mass_fraction`` :math:`= Y` of the release is the heavy gas and
+goes to the first passive scalar, :math:`\rho_d q_g`, which is then itself the gas (there
+is no separate tracer, and ``erf.mass_source.tracer`` is not allowed), and the rest is
+dry air:
+
+.. math::
+
+   S_\rho = (1 - Y) S, \qquad S_{\rho q_g} = Y S, \qquad
+   S_{\rho\theta} = (1 - Y) S \, \theta
+   + \frac{\rho_d}{\rho_d + \rho_g} S \, (\theta_{src} - \theta),
+
+with :math:`S = \dot m / V`. Without ``erf.mass_source.theta`` the gas enters at the
+temperature of the cell (the last term is zero): :math:`\rho\theta` is per unit dry
+mass, so gas alone released into a cell leaves it unchanged. Near a strong release
+the gas can push the dry air out of the source cells, where :math:`q_g = \rho_g/\rho_d`
+becomes ill-conditioned; ERF stops if the dry air falls below
+``erf.mass_source.min_dry_fraction`` of the mass of a source cell. Spread the release
+over a larger region, or dilute it with ``gas_mass_fraction`` < 1 (air entrained in the
+near field of a jet).
 
 The mass source requires ``erf.compressibility_type = FullyCompressible`` at every
 level, and ERF stops at start-up otherwise: the anelastic and pseudo-incompressible
@@ -3581,7 +3601,20 @@ where the second is about 0.3, stopped with a negative density; at :math:`\Delta
 +------------------------------------+----------------------------------------------------------+--------------------+------------------+
 | **erf.mass_source.tracer**         | add the same source to the first passive scalar, so      | Boolean            | true             |
 |                                    | ``scalar`` is the mass fraction of the released gas      |                    |                  |
+|                                    | (not with ``erf.heavy_gas``)                             |                    |                  |
 +------------------------------------+----------------------------------------------------------+--------------------+------------------+
+
+With ``erf.heavy_gas``:
+
++-----------------------------------------+-----------------------------------------------------+--------------------+------------------+
+| Parameter                               | Definition                                          | Acceptable Values  | Default          |
++=========================================+=====================================================+====================+==================+
+| **erf.mass_source.gas_mass_fraction**   | mass fraction of the release that is the heavy      | 0 < Real <= 1      | 1                |
+|                                         | gas; the rest is dry air                            |                    |                  |
++-----------------------------------------+-----------------------------------------------------+--------------------+------------------+
+| **erf.mass_source.min_dry_fraction**    | stop if the dry air falls below this fraction of    | 0 < Real < 1       | 0.01             |
+|                                         | the mass of a source cell                           |                    |                  |
++-----------------------------------------+-----------------------------------------------------+--------------------+------------------+
 
 For example, a release that ramps up to 14000 kg/s from a 50 m radius, 20 m deep
 region around the origin:
@@ -3596,6 +3629,51 @@ region around the origin:
 
 At start-up ERF prints the source region, the theta of the injected gas and, for a
 rate table, its time span and the total mass it releases.
+
+.. _sec:HeavyGas:
+
+Heavy Gas
+---------
+
+``erf.heavy_gas.enable = true`` makes the first passive scalar a gas heavier (or
+lighter) than air at the same temperature, with gas constant ``erf.heavy_gas.R``
+(188.9 J/kg/K for CO\ :sub:`2`). The scalar is then :math:`\rho_d q_g`, the mass of gas per
+unit volume, with :math:`q_g = \rho_g / \rho_d`, and :math:`\theta` stays the dry potential
+temperature. The gas enters
+
+- the equation of state, :math:`p = \rho_d T (R_d + q_g R_g)`, i.e. the moist form
+  with :math:`R_v q_v` replaced by :math:`R_g q_g`,
+- the density in the buoyancy (``erf.buoyancy_type = 1``),
+  :math:`\rho_d (1 + q_g) - \rho_0`, and
+- the inertia of the momentum equations, :math:`\rho_d (1 + q_g)`,
+
+in both the slow right-hand side and the acoustic substeps. The gas has the
+:math:`c_p` of dry air. It needs ``FullyCompressible`` with ``erf.buoyancy_type = 1``
+and ``RK3_ImplicitSubstep`` at every level, ``erf.transport_scalar = true``, no
+moisture, and ``erf.terrain_type`` = ``None`` or ``StaticFittedMesh``; ERF stops at
+start-up otherwise. The inputs are not saved in checkpoints: a restart must set them
+again, or the gas becomes a passive tracer.
+
+With it on, the plotfile ``pressure``, ``temp`` and ``buoyancy`` include the gas, the
+plot variables ``heavy_gas_mass_fraction``, :math:`\rho_g / (\rho_d + \rho_g)`, and
+``total_density``, :math:`\rho_d + \rho_g`, are available, and the integrated quantities
+add ``TOTAL MASS``, the dry air plus the gas. ``erf.mass_source`` releases the gas (see
+above).
+
+``erf.prob_name = "heavy gas"`` sets up a gas of mass fraction
+``prob.gas_mass_fraction`` at the ambient temperature below ``prob.gas_depth`` [m],
+between ``prob.gas_x_lo`` and ``prob.gas_x_hi`` (the whole domain by default; a lock
+when they are set), in air at rest, with every column in discrete hydrostatic balance.
+It is implemented without terrain only, and the grids must not be split in z. See
+``Tests/test_files/HeavyGas_Layer`` and ``HeavyGas_LockExchange``.
+
++------------------------------------+----------------------------------------------------------+--------------------+------------------+
+| Parameter                          | Definition                                               | Acceptable Values  | Default          |
++====================================+==========================================================+====================+==================+
+| **erf.heavy_gas.enable**           | treat the first passive scalar as a heavy gas            | Boolean            | false            |
++------------------------------------+----------------------------------------------------------+--------------------+------------------+
+| **erf.heavy_gas.R**                | gas constant of the gas [J/kg/K]                         | Real > 0           | required         |
++------------------------------------+----------------------------------------------------------+--------------------+------------------+
 
 
 

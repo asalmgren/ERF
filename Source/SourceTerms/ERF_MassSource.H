@@ -33,7 +33,19 @@
  *     is true, so that s is the mass fraction of the released gas.
  * No momentum is added: the gas enters at rest.  The gas has the properties of dry air
  * (in a moist run it carries no water, so it dilutes the mixing ratios of the cells it
- * enters).  The cell volumes include the terrain metric and the map factors.  In a
+ * enters).
+ *
+ * With erf.heavy_gas the released gas is the heavy gas instead: a fraction
+ * erf.mass_source.gas_mass_fraction of the source goes to the first passive scalar
+ * (rho_d * q_g, the gas itself, so there is no separate tracer) and the rest to rho as dry
+ * air.  rho*theta gains the dry air at the cell's theta and, with erf.mass_source.theta,
+ * the change of theta from mixing the release (at theta) into the cell by mass:
+ *     S_rhotheta = S (1 - Y) theta + rho_d S (theta_src - theta) / (rho_d + rho_g).
+ * Without erf.mass_source.theta the gas enters at the cell's temperature.  Since rho_d theta
+ * is per unit dry mass, gas released into a cell then leaves rho*theta unchanged.  The run
+ * stops if the dry air falls below erf.mass_source.min_dry_fraction of the mass of a
+ * source cell, where q_g = rho_g / rho_d would be ill-conditioned: spread the release
+ * over a larger region, or dilute it with gas_mass_fraction < 1.  The cell volumes include the terrain metric and the map factors.  In a
  * periodic direction the region wraps around the domain.  The rate table is in the time
  * since the start of the run.  Unknown erf.mass_source keys stop the run.
  *
@@ -52,7 +64,9 @@
  *   erf.mass_source.rate_file = file         two columns "t mdot" [s, kg/s >= 0], '#' comments;
  *                                            linear in between, zero outside the table
  *   erf.mass_source.theta     = theta        [K > 0]  optional
- *   erf.mass_source.tracer    = true         optional
+ *   erf.mass_source.tracer    = true         optional (not with erf.heavy_gas)
+ *   erf.mass_source.gas_mass_fraction = Y    (0, 1], default 1  (erf.heavy_gas only)
+ *   erf.mass_source.min_dry_fraction  = f    (0, 1), default 0.01 (erf.heavy_gas only)
  */
 namespace erf_mass_source {
 
@@ -96,18 +110,21 @@ public:
     /// The source the inputs ask for, or nullptr when no erf.mass_source input is given.
     /// Stops on an unknown erf.mass_source key (a misspelt one would otherwise be ignored,
     /// and a misspelt rate would turn the source off) and on inputs without a rate.
-    static std::unique_ptr<MassSource> from_inputs ()
+    /// heavy_gas is erf.heavy_gas: the source then releases the heavy gas.
+    static std::unique_ptr<MassSource> from_inputs (bool heavy_gas = false)
     {
         const std::string prefix = "erf.mass_source.";
         const std::set<std::string> known = {"rate", "rate_file", "center", "radius",
-                                             "height", "theta", "tracer"};
+                                             "height", "theta", "tracer",
+                                             "gas_mass_fraction", "min_dry_fraction"};
         bool any = false;
         for (const auto& name : amrex::ParmParse::getEntries("erf.mass_source")) {
             if (name.rfind(prefix, 0) != 0) { continue; }
             any = true;
             if (known.count(name.substr(prefix.size())) == 0) {
                 amrex::Abort("erf.mass_source: unknown input " + name + "; the inputs are rate, "
-                             "rate_file, center, radius, height, theta and tracer");
+                             "rate_file, center, radius, height, theta, tracer, "
+                             "gas_mass_fraction and min_dry_fraction");
             }
         }
         amrex::ParmParse pp("erf.mass_source");
@@ -137,7 +154,27 @@ public:
         if (ms->m_fixed_theta && !(ms->m_theta > 0)) {
             amrex::Abort("erf.mass_source.theta must be positive");
         }
-        pp.query("tracer", ms->m_tracer);
+        ms->m_heavy = heavy_gas;
+        if (heavy_gas) {
+            if (pp.contains("tracer")) {
+                amrex::Abort("erf.mass_source.tracer: with erf.heavy_gas the released gas is rhoadv_0 "
+                             "itself, so there is no separate tracer; remove the input");
+            }
+            ms->m_tracer = false;
+            pp.query("gas_mass_fraction", ms->m_gas_fraction);
+            if (!(ms->m_gas_fraction > 0 && ms->m_gas_fraction <= 1)) {
+                amrex::Abort("erf.mass_source.gas_mass_fraction must be in (0, 1]");
+            }
+            pp.query("min_dry_fraction", ms->m_min_dry_fraction);
+            if (!(ms->m_min_dry_fraction > 0 && ms->m_min_dry_fraction < 1)) {
+                amrex::Abort("erf.mass_source.min_dry_fraction must be in (0, 1)");
+            }
+        } else {
+            if (pp.contains("gas_mass_fraction") || pp.contains("min_dry_fraction")) {
+                amrex::Abort("erf.mass_source.gas_mass_fraction and min_dry_fraction need erf.heavy_gas");
+            }
+            pp.query("tracer", ms->m_tracer);
+        }
 
         if (pp.contains("rate")) {
             amrex::Real r;
@@ -166,7 +203,13 @@ public:
         } else {
             amrex::Print() << "; at the theta of each cell";
         }
-        amrex::Print() << (ms->m_tracer ? "; tracer in rhoadv_0" : "") << std::endl;
+        amrex::Print() << (ms->m_tracer ? "; tracer in rhoadv_0" : "");
+        if (ms->m_heavy) {
+            amrex::Print() << "; heavy gas (mass fraction " << ms->m_gas_fraction
+                           << " of the release) in rhoadv_0, stopping below a dry-air fraction of "
+                           << ms->m_min_dry_fraction;
+        }
+        amrex::Print() << std::endl;
         return ms;
     }
 
@@ -321,6 +364,11 @@ public:
         const amrex::Real theta_src = m_theta;
         const bool tracer = m_tracer;
 
+        if (m_heavy) {
+            add_heavy_gas_sources(cc_src, cons, z_phys_nd, geom, *lg.ground, S, time);
+            return;
+        }
+
         for (amrex::MFIter mfi(cons); mfi.isValid(); ++mfi) {
             const amrex::Box& bx = mfi.validbox();
             auto z   = z_phys_nd->const_array(mfi);
@@ -339,6 +387,61 @@ public:
     }
 
 private:
+    /// The heavy-gas release (see the class comment): the gas to the first passive scalar, the
+    /// dry air to rho, and the dry-air guard
+    void add_heavy_gas_sources (amrex::MultiFab& cc_src,
+                                const amrex::MultiFab& cons,
+                                const amrex::MultiFab* z_phys_nd,
+                                const amrex::Geometry& geom,
+                                const amrex::MultiFab& ground,
+                                amrex::Real S, amrex::Real time) const
+    {
+        const auto dx     = geom.CellSizeArray();
+        const auto problo = geom.ProbLoArray();
+        const int  kg     = geom.Domain().smallEnd(2);
+        const auto period = erf_mass_source::periodic_lengths(geom);
+        const amrex::Real x0 = m_x0, y0 = m_y0, r2 = m_radius * m_radius, hmax = m_height;
+        const bool fixed_theta = m_fixed_theta;
+        const amrex::Real theta_src = m_theta;
+        const amrex::Real Y = m_gas_fraction;
+
+        amrex::ReduceOps<amrex::ReduceOpMin> reduce_op;
+        amrex::ReduceData<amrex::Real> reduce_data(reduce_op);
+        using ReduceTuple = typename decltype(reduce_data)::Type;
+
+        for (amrex::MFIter mfi(cons); mfi.isValid(); ++mfi) {
+            const amrex::Box& bx = mfi.validbox();
+            auto z   = z_phys_nd->const_array(mfi);
+            auto zg  = ground.const_array(mfi);
+            auto c   = cons.const_array(mfi);
+            auto src = cc_src.array(mfi);
+            reduce_op.eval(bx, reduce_data, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept -> ReduceTuple
+            {
+                if (!erf_mass_source::in_source(i,j,k,z,zg,kg,problo,dx,period,x0,y0,r2,hmax)) {
+                    return {amrex::Real(1)};
+                }
+                const amrex::Real rd = c(i,j,k,Rho_comp);
+                const amrex::Real rt = rd + c(i,j,k,RhoScalar_comp);
+                const amrex::Real th = c(i,j,k,RhoTheta_comp) / rd;
+                src(i,j,k,Rho_comp)       += S * (amrex::Real(1) - Y);
+                src(i,j,k,RhoScalar_comp) += S * Y;
+                src(i,j,k,RhoTheta_comp)  += S * (amrex::Real(1) - Y) * th;
+                if (fixed_theta) { src(i,j,k,RhoTheta_comp) += rd * S * (theta_src - th) / rt; }
+                return {rd / rt};
+            });
+        }
+        amrex::Real min_dry = amrex::get<0>(reduce_data.value(reduce_op));
+        amrex::ParallelDescriptor::ReduceRealMin(min_dry);
+        if (min_dry < m_min_dry_fraction) {
+            std::ostringstream msg;
+            msg << "erf.mass_source: at t = " << time << " s the dry air is " << min_dry
+                << " of the mass of a source cell, below erf.mass_source.min_dry_fraction = "
+                << m_min_dry_fraction << "; spread the release over a larger region (radius, height) "
+                << "or dilute it (gas_mass_fraction < 1)";
+            amrex::Abort(msg.str());
+        }
+    }
+
     void read_rate_file (const std::string& fname)
     {
         amrex::Vector<char> chars;
@@ -381,6 +484,9 @@ private:
     bool m_fixed_theta = false;
     bool m_tracer = true;
     bool m_constant = false;
+    bool m_heavy = false;                 // erf.heavy_gas: the release is the heavy gas
+    amrex::Real m_gas_fraction = 1;       // its mass fraction of the release
+    amrex::Real m_min_dry_fraction = amrex::Real(0.01);
     amrex::Vector<amrex::Real> m_t, m_mdot;
 
     amrex::Vector<LevelGeometry> m_lev;

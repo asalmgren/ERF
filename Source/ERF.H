@@ -2168,6 +2168,7 @@ private:
                                                     "magvel", "divU",
                                                     "pres_hse", "dens_hse", "theta_hse", "pi_hse", "qv_hse",
                                                     "pressure", "pert_pres", "pert_dens",
+                                                    "heavy_gas_mass_fraction", "total_density",
                                                     "buoyancy", "eq_pot_temp", "VPD",
 #ifdef ERF_USE_WINDFARM
                                                     "num_turb", "SMark0", "SMark1",

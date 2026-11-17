@@ -86,6 +86,7 @@ ERF::canonicalizePlot3DVariables (Vector<std::string>& plot_var_names)
     capabilities.eddy_diffusivity_storage = true;
     capabilities.dissipation_storage = true;
     capabilities.wall_distance_storage = true;
+    capabilities.heavy_gas = solverChoice.heavy_gas;
     for (int lev = 0; lev <= max_level; ++lev) {
         capabilities.eddy_diffusivity_storage =
             capabilities.eddy_diffusivity_storage && solverChoice.turbChoice[lev].use_kturb;
@@ -674,10 +675,15 @@ ERF::FillPlot3DVars (int lev,
                 const Array4<Real      >& p_arr = pressure.array(mfi);
                 const Array4<Real const>& S_arr = vars_new[lev][Vars::cons].const_array(mfi);
                 const int qv_comp = mi.qv;
+                const bool l_heavy_gas = solverChoice.heavy_gas;
+                const Real RgoRv = solverChoice.RgoRv;
 
                 ParallelFor(gbx, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept
                 {
                     Real qv_for_p = (qv_comp >= 0) ? S_arr(i,j,k,qv_comp)/S_arr(i,j,k,Rho_comp) : 0;
+                    if (l_heavy_gas) {
+                        qv_for_p = getQforEOS(qv_for_p, S_arr(i,j,k,RhoScalar_comp)/S_arr(i,j,k,Rho_comp), RgoRv);
+                    }
                     const Real rhotheta = S_arr(i,j,k,RhoTheta_comp);
                     p_arr(i, j, k) = getPgivenRTh(rhotheta,qv_for_p);
                 });
@@ -746,6 +752,26 @@ ERF::FillPlot3DVars (int lev,
                     const Real theta = state(i,j,k,RhoTheta_comp) /
                                        state(i,j,k,Rho_comp);
                     temp(i,j,k,0) = getTgivenPandTh(p0(i,j,k), theta, rdOcp);
+                });
+            }
+            ++mf_comp;
+        }
+    } else if (solverChoice.heavy_gas) {
+        // the temperature of the mixture: p = (rho_d R_d + rho_g R_g) T (heavy gas runs are dry)
+        if (containerHasElement(plot_var_names, "temp")) {
+            MultiFab dmf(mf_dst, make_alias, mf_comp, 1);
+            const Real RgoRv = solverChoice.RgoRv;
+#ifdef _OPENMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+            for (MFIter mfi(dmf, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+                const Box& bx = mfi.tilebox();
+                const auto temp = dmf.array(mfi);
+                const auto state = vars_new[lev][Vars::cons].const_array(mfi);
+                ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept {
+                    const Real qg = state(i,j,k,RhoScalar_comp) / state(i,j,k,Rho_comp);
+                    temp(i,j,k,0) = getTgivenRandRTh(state(i,j,k,Rho_comp), state(i,j,k,RhoTheta_comp),
+                                                     getQforEOS(zero, qg, RgoRv));
                 });
             }
             ++mf_comp;
@@ -879,6 +905,32 @@ ERF::FillPlot3DVars (int lev,
         mf_comp ++;
     }
 
+    // erf.heavy_gas: the mass fraction of the gas, rho_g / (rho_d + rho_g), and the density of
+    // the dry air plus the gas (heavy gas runs are dry, so this is the density of the fluid)
+    if (containerHasElement(plot_var_names, "heavy_gas_mass_fraction"))
+    {
+#ifdef _OPENMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+        for ( MFIter mfi(mf_dst,TilingIfNotGPU()); mfi.isValid(); ++mfi)
+        {
+            const Box& bx = mfi.tilebox();
+            const Array4<Real>& derdat  = mf_dst.array(mfi);
+            const Array4<Real const>& S_arr = vars_new[lev][Vars::cons].const_array(mfi);
+            ParallelFor(bx, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept {
+                derdat(i, j, k, mf_comp) = S_arr(i,j,k,RhoScalar_comp) /
+                                           (S_arr(i,j,k,Rho_comp) + S_arr(i,j,k,RhoScalar_comp));
+            });
+        }
+        mf_comp ++;
+    }
+    if (containerHasElement(plot_var_names, "total_density"))
+    {
+        MultiFab::Copy(mf_dst, vars_new[lev][Vars::cons], Rho_comp, mf_comp, 1, 0);
+        MultiFab::Add (mf_dst, vars_new[lev][Vars::cons], RhoScalar_comp, mf_comp, 1, 0);
+        mf_comp ++;
+    }
+
     if (containerHasElement(plot_var_names, "buoyancy"))
     {
         MultiFab     qt(mf_dst.boxArray(), mf_dst.DistributionMap(), 1, 1);
@@ -890,6 +942,10 @@ ERF::FillPlot3DVars (int lev,
         int n_qstate_into_total = micro->Get_Qstate_Moist_Size() - micro->Get_Qstate_Moist_NumConc_Size();
         if (solverChoice.moisture_type != MoistureType::None) {
             make_qt(vars_new[lev][Vars::cons], qt, n_qstate_into_total);
+        }
+        if (solverChoice.heavy_gas) {
+            add_heavy_gas_to_qt(vars_new[lev][Vars::cons], qt,
+                                solverChoice.moisture_type != MoistureType::None);
         }
         //
         // NOTE: we must fill one ghost cell of S_prim here because make_buoyancy

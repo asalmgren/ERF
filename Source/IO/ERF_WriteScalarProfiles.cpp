@@ -221,6 +221,8 @@ ERF::sum_integrated_quantities (double time)
 #endif
            Print() << std::setprecision(sumprecision) << " RHO THETA  = " << rhth_sl << '\n';
            if (solverChoice.transport_scalar) { Print() << std::setprecision(sumprecision) << " RHO SCALAR = " << scal_sl << '\n'; }
+           // with erf.heavy_gas the scalar is the gas, so the fluid mass is the dry mass plus the gas
+           if (solverChoice.heavy_gas) { Print() << std::setprecision(sumprecision) << " TOTAL MASS = " << mass_sl + scal_sl << '\n'; }
            if (solverChoice.moisture_type != MoistureType::None) { Print() << std::setprecision(sumprecision) << " RHO QTOTAL = " << mois_sl << '\n'; }
 #ifdef ERF_USE_DUST
            if (m_dust_model) { Print() << std::setprecision(sumprecision) << " RHO DUST   = " << dust_sl << '\n'; }
@@ -236,6 +238,7 @@ ERF::sum_integrated_quantities (double time)
 #endif
            Print() << std::setprecision(sumprecision) << " RHO THETA  SL/ML = " << rhth_sl << " " << rhth_ml << '\n';
            if (solverChoice.transport_scalar) { Print() << std::setprecision(sumprecision) << " RHO SCALAR SL/ML = " << scal_sl << " " << scal_ml << '\n'; }
+           if (solverChoice.heavy_gas) { Print() << std::setprecision(sumprecision) << " TOTAL MASS SL/ML = " << mass_sl + scal_sl << " " << mass_ml + scal_ml << '\n'; }
            if (solverChoice.moisture_type != MoistureType::None) { Print() << std::setprecision(sumprecision) << " RHO QTOTAL SL/ML = " << mois_sl << " " << mois_ml << '\n'; }
 #ifdef ERF_USE_DUST
            if (m_dust_model) { Print() << std::setprecision(sumprecision) << " RHO DUST   SL/ML = " << dust_sl << " " << dust_ml << '\n'; }

@@ -504,6 +504,8 @@ TEST(Plotfile3DSelection, OptionalStorageGroupsAreExplicit)
     EXPECT_FALSE(erf_plotfile::plot3d_fixed_variable_available("Kmv", caps));
     EXPECT_FALSE(erf_plotfile::plot3d_fixed_variable_available("diss", caps));
     EXPECT_FALSE(erf_plotfile::plot3d_fixed_variable_available("walldist", caps));
+    EXPECT_FALSE(erf_plotfile::plot3d_fixed_variable_available("heavy_gas_mass_fraction", caps));
+    EXPECT_FALSE(erf_plotfile::plot3d_fixed_variable_available("total_density", caps));
 
     caps.time_average_storage = true;
     caps.interval_mean_storage = true;
@@ -511,6 +513,7 @@ TEST(Plotfile3DSelection, OptionalStorageGroupsAreExplicit)
     caps.eddy_diffusivity_storage = true;
     caps.dissipation_storage = true;
     caps.wall_distance_storage = true;
+    caps.heavy_gas = true;
     EXPECT_TRUE(erf_plotfile::plot3d_fixed_variable_available("u_t_avg", caps));
     EXPECT_TRUE(erf_plotfile::plot3d_fixed_variable_available("u_mean", caps));
     EXPECT_TRUE(erf_plotfile::plot3d_fixed_variable_available("wtheta_fluct", caps));
@@ -519,6 +522,8 @@ TEST(Plotfile3DSelection, OptionalStorageGroupsAreExplicit)
     EXPECT_TRUE(erf_plotfile::plot3d_fixed_variable_available("Lturb", caps));
     EXPECT_TRUE(erf_plotfile::plot3d_fixed_variable_available("diss", caps));
     EXPECT_TRUE(erf_plotfile::plot3d_fixed_variable_available("walldist", caps));
+    EXPECT_TRUE(erf_plotfile::plot3d_fixed_variable_available("heavy_gas_mass_fraction", caps));
+    EXPECT_TRUE(erf_plotfile::plot3d_fixed_variable_available("total_density", caps));
 }
 
 // Motivation: qsrc_sw / qsrc_lw storage exists for every erf.radiation_model

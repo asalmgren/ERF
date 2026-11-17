@@ -64,6 +64,9 @@ struct Plot3DSelectionCapabilities
     bool eddy_diffusivity_storage = false;
     bool dissipation_storage = false;
     bool wall_distance_storage = false;
+
+    //! erf.heavy_gas: the first passive scalar is a gas heavier than air
+    bool heavy_gas = false;
 };
 
 /**
@@ -294,6 +297,7 @@ plot3d_fixed_variable_available (const std::string& name,
     }
     if (name == "diss") return caps.dissipation_storage;
     if (name == "walldist") return caps.wall_distance_storage;
+    if (name == "heavy_gas_mass_fraction" || name == "total_density") return caps.heavy_gas;
 
     return plot3d_fixed_unconditional_diagnostic(name);
 }

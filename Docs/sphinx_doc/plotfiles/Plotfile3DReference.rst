@@ -64,6 +64,20 @@ The default subvolume inventory is documented on :ref:`sec:Plotfiles`.
 |                             | density          |
 |                             | [kg/m^3]         |
 +-----------------------------+------------------+
+| **heavy_gas_mass_fraction** | Mass fraction of |
+|                             | the heavy gas,   |
+|                             | rho_g/(rho_d +   |
+|                             | rho_g) (only     |
+|                             | with             |
+|                             | erf.heavy_gas)   |
++-----------------------------+------------------+
+| **total_density**           | Dry air plus     |
+|                             | heavy gas        |
+|                             | density (only    |
+|                             | with             |
+|                             | erf.heavy_gas)   |
+|                             | [kg/m^3]         |
++-----------------------------+------------------+
 | **pressure**                | Total pressure   |
 |                             | [Pa]             |
 |                             |                  |

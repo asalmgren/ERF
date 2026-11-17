@@ -13,6 +13,7 @@ CEXE_headers += ERF_InitCustomPert_IsentropicVortex.H
 CEXE_headers += ERF_InitCustomPert_KE.H
 CEXE_headers += ERF_InitCustomPert_MovingTerrain.H
 CEXE_headers += ERF_InitCustomPert_MultiSpeciesBubble.H
+CEXE_headers += ERF_InitCustomPert_HeavyGas.H
 CEXE_headers += ERF_InitCustomPert_ParticleTests.H
 CEXE_headers += ERF_InitCustomPert_RICO.H
 CEXE_headers += ERF_InitCustomPert_ScalarAdvDiff.H

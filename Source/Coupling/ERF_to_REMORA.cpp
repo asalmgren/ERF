@@ -18,8 +18,7 @@
 
 #include <limits>
 
-namespace
-{
+namespace erf_detail_to_REMORA {
 // Contract slot indices, in driver active-view order (mirrors
 // ERFRemoraCouplingContract.H; repeated to avoid a driver->submodule include).
 constexpr int iUwind = 0, iVwind = 1, iPatm = 2, iRH = 3, iTair = 4;
@@ -39,7 +38,7 @@ PrintFluxLaneStats (const char* label, const amrex::MultiFab& mf, int comp = 0)
 }
 
 // The eastward and northward components (0 and 1 of en, on the 2D layout of the
-// level) at the cell centres of plane k of a vector whose x and y components fx and fy
+// level) at the cell centers of plane k of a vector whose x and y components fx and fy
 // are on the x and y faces: the faces either side averaged, then turned from the grid
 // axes with the grid orientation cos_alpha/sin_alpha (on en's layout), or left along
 // them when that is null.
@@ -149,7 +148,7 @@ StagedSourceBoxArray (const amrex::MultiFab& src,
 
     // The staged boxes carry the source's index type, so that intersecting them with
     // the source's boxes cannot trip Box::operator&='s sameType assertion. Every
-    // source is cell-centred today.
+    // source is cell-centered today.
     const IndexType src_ixtype = src.boxArray().ixType();
 
     BoxList bl(src_ixtype);
@@ -264,6 +263,7 @@ ApplyConservativeRemap (const amrex::MultiFab& src,
     }
 }
 }
+using namespace erf_detail_to_REMORA;
 
 double
 ERF::EvolveOneStep (double /*time*/, double /*dt_request*/)
@@ -604,9 +604,9 @@ ERF::PackAtmosphericStates (amrex::Vector<amrex::MultiFab*>& states,
         //       have to be checked before they are dereferenced.
         //
 
-        // The stress goes east and north at the cell centres, like the wind. A vector can
+        // The stress goes east and north at the cell centers, like the wind. A vector can
         // only be turned where both of its components are, so tau13 and tau23 are averaged
-        // from the faces to the centres first; REMORA turns the stress to its own axes at
+        // from the faces to the centers first; REMORA turns the stress to its own axes at
         // its rho points and averages it to its u and v points, as ROMS does with the
         // stress COAWST sends it from WRF.
         const bool want_taux = iTauX < static_cast<int>(states.size()) && states[iTauX] != nullptr;
@@ -718,7 +718,7 @@ ERF::PackAtmosphericStates (amrex::Vector<amrex::MultiFab*>& states,
         return;
     }
 
-    // --- Uwind + Vwind, east and north at the cell centres of the lowest level ---
+    // --- Uwind + Vwind, east and north at the cell centers of the lowest level ---
     if ((iUwind < static_cast<int>(states.size()) && states[iUwind] != nullptr) ||
         (iVwind < static_cast<int>(states.size()) && states[iVwind] != nullptr)) {
 
@@ -974,10 +974,9 @@ ERF::ApplyOceanSurfaceState (const amrex::Vector<amrex::MultiFab*>& state,
         amrex::BoxArray ba;
         amrex::DistributionMapping dm;
         GetOceanToAtmosSurfaceLayout(ba, dm);
-        // No ghost cells: SurfaceLayer::fill_tsurf_with_coupled_sst clamps its sample
-        // index into the valid box, exactly as get_lsm_tsurf does for the LSM
-        // arrays, so ghosts here would never be read. t_surf's own ghosts are
-        // filled by the FillBoundary at the end of update_fluxes.
+        // No ghost cells: SurfaceLayer::fill_tsurf_with_coupled_sst copies the SST and its
+        // coverage into temporaries with the halo of t_surf, filled from the valid cells
+        // that own it, so ghosts here would never be read.
         m_coupled_sst       = std::make_unique<amrex::MultiFab> (ba, dm, 1, 0);
         m_coupled_sst_valid = std::make_unique<amrex::iMultiFab>(ba, dm, 1, 0);
     }
@@ -996,9 +995,9 @@ ERF::ApplyOceanSurfaceState (const amrex::Vector<amrex::MultiFab*>& state,
             0, m_coupled_sst.get(), m_coupled_sst_valid.get());
     }
 
-    // Diagnostics only from here on. The driver calls this every ERF substep with
-    // the SST of the last exchange, and REMORA already checks that SST on its wet
-    // cells once per exchange, so run this on the first call and at erf.v >= 2 only.
+    // Diagnostics only from here on. The driver calls this once per exchange with
+    // that exchange's SST, which REMORA has already checked on its wet cells when
+    // it packed it, so run this on the first call and at erf.v >= 2 only.
     // verbose is a ParmParse value, so every rank returns together.
     if (m_checked_coupled_sst && verbose < 2) { return; }
     m_checked_coupled_sst = true;

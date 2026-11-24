@@ -114,6 +114,9 @@ entire columns, so they cannot be used on a level whose grids do not span the do
    The value should be the checkpoint directory name (relative to the run
    directory or an absolute path). When set, ERF reads the velocity fields from
    that checkpoint and uses the usual initialization pathway for all other fields.
+   The checkpoint may have been written on other grids or with a different number
+   of MPI ranks; its grids at each level only need to cover the new run's grids
+   at that level.
 
 In any of these cases, the user can specify any perturbations from the
 base state by editing the routines that live in the ``Source/Prob`` directory
@@ -275,7 +278,7 @@ changes with a land model too: every soil layer of the file is read (see below).
    * - ``ZS``
      - m
      - 0 to 1e4, increasing
-     - Depth of the centre of each soil layer, one column for the level
+     - Depth of the center of each soil layer, one column for the level
    * - ``DZS``
      - m
      - > 0 to 1e4
@@ -307,7 +310,7 @@ written without a land model can hold them that way. ``TSLB``, ``SMOIS``, ``ZS``
 four are left out together, with a message. Every soil layer of the file is read, also
 when the file has fewer atmospheric levels than soil layers. Before, the soil variables
 were cut at the number of atmospheric levels; this also holds for a run with a land
-model, where it is the intended behaviour: the soil arrays of a land model have the
+model, where it is the intended behavior: the soil arrays of a land model have the
 file's number of soil layers.
 
 A ``wrfinput`` file written by ``real.exe`` holds ``ALBBCK`` and does not hold ``ALBEDO``
@@ -346,8 +349,10 @@ The fields are kept per level in ``WRFSurfaceFields``
    * - Level without a file of its own (made by tagging, at the start or by a regrid)
      - Every field of the next coarser level, and its soil layer depths, in the same way
 
-No part of ERF uses them yet; the force-restore balance will take its albedo, roughness,
-deep temperature, soil moisture and snow from them in later changes. Until then the cost
+The force-restore balance takes its deep temperature from ``TMN`` with
+``erf.radiation.seb_init_t_deep_from_file``; no part of ERF uses the other fields yet, and
+the balance will take its albedo, roughness, soil moisture and snow from them in later
+changes. Until then the cost
 is the read of up to thirteen more variables at the start, the memory of up to eleven
 two-dimensional fields per level, and their files in each checkpoint.
 
@@ -471,6 +476,9 @@ When ``erf.nc_low_file`` names a wrflowinp file, level 0 reads its sea surface t
 (SST) from it at each of the file's times, and the surface layer interpolates linearly in
 time between the two slices that bracket the current time.  Over water the skin
 temperature (TSK) takes the SST from the file, so it is interpolated in time the same way.
+Both are kept as absolute temperature; the surface layer converts them to potential
+temperature with the surface pressure of the current state each time it uses them, so
+the surface potential temperature follows the pressure as it changes during the run.
 
 A finer level may be given a wrflowinp file of its own, as WRF does for a nest run with
 ``sst_update = 1``::

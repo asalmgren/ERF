@@ -21,7 +21,34 @@
 
 using namespace amrex;
 
-namespace {
+namespace erf_detail_MakeNewArrays {
+
+// MomentumToVelocity leaves faces between two covered cells untouched.
+// ComputeStrain_EB can read those neighbors in its centered differences, so
+// initialize only those faces to rest and keep the sentinel on fluid faces.
+void
+set_covered_face_velocity (MultiFab& vel_new, MultiFab& vel_old,
+                           const MultiFab& volfrac, int dir)
+{
+    const IntVect offset = IntVect::TheDimensionVector(dir);
+    const int di = offset[0], dj = offset[1], dk = offset[2];
+    for (MFIter mfi(vel_new); mfi.isValid(); ++mfi) {
+        const Box& bx = mfi.fabbox();
+        Box available_faces = convert(volfrac[mfi].box(), vel_new.ixType());
+        available_faces.grow(dir, -1);
+        AMREX_ALWAYS_ASSERT_WITH_MESSAGE(available_faces.contains(bx),
+            "Covered-face velocity initialization requires both adjacent cell volumes");
+        const auto vf = volfrac.const_array(mfi);
+        const auto vnew = vel_new.array(mfi);
+        const auto vold = vel_old.array(mfi);
+        ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept {
+            if (vf(i,j,k) == zero && vf(i-di,j-dj,k-dk) == zero) {
+                vnew(i,j,k) = zero;
+                vold(i,j,k) = zero;
+            }
+        });
+    }
+}
 
 // Smoothly varying test map factors, valid and ghost cells, at the MultiFab's own locations.
 // NOTE: a free function, since nvcc does not allow an extended (__device__) lambda inside a
@@ -46,6 +73,7 @@ set_test_mapfactor (MultiFab& mf, const Geometry& geom, const Real amp)
 }
 
 } // namespace
+using namespace erf_detail_MakeNewArrays;
 
 void
 ERF::init_stuff (int lev, const BoxArray& ba, const DistributionMapping& dm,
@@ -214,7 +242,7 @@ ERF::init_stuff (int lev, const BoxArray& ba, const DistributionMapping& dm,
     lev_new[Vars::yvel].define(convert(ba, IntVect(0,1,0)), dm, 1, ngrow_vels);
     lev_old[Vars::yvel].define(convert(ba, IntVect(0,1,0)), dm, 1, ngrow_vels);
 
-    // Set these to avoid operations on uninitialized data
+    // Set these to avoid operations on uninitialized data.
     lev_new[Vars::xvel].setVal(bogus_large_value);
     lev_old[Vars::xvel].setVal(bogus_large_value);
     lev_new[Vars::yvel].setVal(bogus_large_value);
@@ -226,6 +254,14 @@ ERF::init_stuff (int lev, const BoxArray& ba, const DistributionMapping& dm,
     lev_old[Vars::zvel].define(convert(ba, IntVect(0,0,1)), dm, 1, ngrow_vels);
     lev_new[Vars::zvel].setVal(bogus_large_value);
     lev_old[Vars::zvel].setVal(bogus_large_value);
+
+    if (solverChoice.terrain_type == TerrainType::EB) {
+        const MultiFab& volfrac = EBFactory(lev).getVolFrac();
+        for (int dir = 0; dir < AMREX_SPACEDIM; ++dir) {
+            const int var_idx = Vars::xvel + dir;
+            set_covered_face_velocity(lev_new[var_idx], lev_old[var_idx], volfrac, dir);
+        }
+    }
 
     gradp[lev][GpVars::gpx].define(convert(ba, IntVect(1,0,0)), dm, 1, 1); gradp[lev][GpVars::gpx].setVal(zero);
     gradp[lev][GpVars::gpy].define(convert(ba, IntVect(0,1,0)), dm, 1, 1); gradp[lev][GpVars::gpy].setVal(zero);
@@ -242,7 +278,7 @@ ERF::init_stuff (int lev, const BoxArray& ba, const DistributionMapping& dm,
         lagged_delta_rt[lev].setVal(zero);
     }
 
-    // We use these for advecting the slow variables, whether anelastic or compressible
+    // We use these for advecting the slow variables, whether anelastic, pseudo-incompressible or compressible
     avg_xmom[lev].define(convert(ba, IntVect(1,0,0)), dm, 1, 1);
     avg_ymom[lev].define(convert(ba, IntVect(0,1,0)), dm, 1, 1);
     avg_zmom[lev].define(convert(ba, IntVect(0,0,1)), dm, 1, 1);
@@ -315,7 +351,7 @@ ERF::init_stuff (int lev, const BoxArray& ba, const DistributionMapping& dm,
     make_flux_register(lev);
 
     // ********************************************************************************************
-    // Define Theta_prim storage if using surface_layer BC
+    // Define primitive storage for physical or embedded SurfaceLayer owners
     // ********************************************************************************************
     Theta_prim[lev] = nullptr;
     Qv_prim[lev]    = nullptr;
@@ -323,7 +359,8 @@ ERF::init_stuff (int lev, const BoxArray& ba, const DistributionMapping& dm,
 
     for (OrientationIter oit; oit; ++oit) {
         Orientation ori = oit();
-        if (phys_bc_type[ori] == ERF_BC::surface_layer) {
+        const bool eb_surface_layer = static_cast<int>(ori) == Orientation::zlo() && use_eb_surface_layer();
+        if ((phys_bc_type[ori] == ERF_BC::surface_layer) || eb_surface_layer) {
             amrex::Print() << " Found MOST at face " << ori << " : Constructing primitive vars for MOST.." << std::endl;
             Theta_prim[lev] = std::make_unique<MultiFab>(ba,dm,1,IntVect(ngrow_state,ngrow_state,1));
             if (solverChoice.moisture_type != MoistureType::None) {
@@ -433,6 +470,11 @@ ERF::init_stuff (int lev, const BoxArray& ba, const DistributionMapping& dm,
     if (lev == 0) {
         wrf_C1H  = std::make_unique<MultiFab>(ba1d[lev],dm,1,IntVect(ng[0],ng[1],ng[2]));
         wrf_C2H  = std::make_unique<MultiFab>(ba1d[lev],dm,1,IntVect(ng[0],ng[1],ng[2]));
+        wrf_C1F  = std::make_unique<MultiFab>(convert(ba1d[lev],IntVect(0,0,1)),dm,1,IntVect(ng[0],ng[1],0));
+        wrf_C2F  = std::make_unique<MultiFab>(convert(ba1d[lev],IntVect(0,0,1)),dm,1,IntVect(ng[0],ng[1],0));
+        // Pure sigma (hybrid_opt = 0) until a wrfinput or checkpoint says otherwise
+        wrf_C1F->setVal(one);
+        wrf_C2F->setVal(zero);
         wrf_RDNW = std::make_unique<MultiFab>(ba1d[lev],dm,1,IntVect(ng[0],ng[1],ng[2]));
         wrf_MUB  = std::make_unique<MultiFab>(ba2d[lev],dm,1,IntVect(ng[0],ng[1],ng[2]));
         wrf_PHB  = std::make_unique<MultiFab>(convert(ba,IntVect(0,0,1)),dm,1,IntVect(ngrow+1,ngrow+1,0));
@@ -574,6 +616,10 @@ ERF::init_stuff (int lev, const BoxArray& ba, const DistributionMapping& dm,
     if (solverChoice.topographicChoice.active()) {
         topographic_radiation.define_level(lev, ba2d[lev], dm, geom[lev]);
     }
+
+    // Every radiation model needs whole columns; check this level's grids before any of them
+    // sees them
+    check_rad_level_grids(lev, ba);
 
     // Two-stream radiation: the model owns its 2D surface and SEB fields.
     if (solverChoice.rad_type == RadiationType::TwoStream)
@@ -940,6 +986,74 @@ ERF::fill_terrain_surface (int lev, MultiFab& z_phys, double elapsed_time)
     }
 }
 
+/**
+ * Build the nodal heights of level lev in dst from the terrain description: interpolate from
+ * the coarser level's heights crse_znd (lev > 0 only; pass nullptr at level 0), put the terrain
+ * surface at this level's resolution in the k=0 slab (unless the fine terrain is interpolated),
+ * and fit the mesh to it.  dst may live on any BoxArray at level lev; only its own boxes and ghost
+ * nodes are filled, so a level and a temporary MultiFab on the same boxes get identical heights.
+ * This is the path for terrain given by the problem (not WRFInput or Metgrid).
+ *
+ * @param[in]  lev       level of refinement whose resolution dst has
+ * @param[in]  crse_znd  heights of level lev-1, with all their ghost nodes filled (lev > 0)
+ * @param[out] dst       nodal heights at level lev
+ * @param[in]  time      time at which the terrain surface is evaluated
+ */
+void
+ERF::build_zphys_nd (int lev, const MultiFab* crse_znd, MultiFab& dst, double time)
+{
+    if (lev > 0) {
+        AMREX_ALWAYS_ASSERT(crse_znd != nullptr);
+        //
+        // First interpolate from coarser level
+        // NOTE: this interpolater assumes that ALL ghost cells of the coarse MultiFab
+        //       have been pre-filled - this includes ghost cells both inside and outside
+        //       the domain
+        //
+        InterpFromCoarseLevel(dst, dst.nGrowVect(),
+                              IntVect(0,0,0), // do NOT fill ghost cells outside the domain
+                              *crse_znd, 0, 0, 1,
+                              geom[lev-1], geom[lev],
+                              refRatio(lev-1), &node_bilinear_interp,
+                              domain_bcs_type, BCVars::cons_bc);
+    }
+
+    //
+    // The STF and Sullivan TF transformations are only defined on a level that
+    // spans the full column, so on a fine level we build the mesh from the one
+    // just interpolated from the coarse level instead.  "interpolate" uses that
+    // mesh as-is; "transform" additionally reads the terrain at the fine
+    // resolution and blends it in with a correction that decays with height.
+    //
+    ParmParse pp("erf");
+    int terrain_smoothing = 0;
+    pp.query("terrain_smoothing", terrain_smoothing);
+
+    FineTerrain fine_terrain = (lev > 0 && terrain_smoothing != 0) ? which_fine_terrain()
+                                                                  : FineTerrain::None;
+
+    //
+    // Save the interpolated mesh before the fine terrain overwrites the k=0 slab,
+    // since the transform is expressed relative to it.  The ghost nodes are
+    // included because the transform corrects the ghost columns as well.
+    //
+    MultiFab z_phys_interp;
+    if (fine_terrain == FineTerrain::Transform) {
+        z_phys_interp.define(dst.boxArray(), dst.DistributionMap(), 1, dst.nGrowVect());
+        MultiFab::Copy(z_phys_interp, dst, 0, 0, 1, dst.nGrowVect());
+    }
+
+    if (fine_terrain != FineTerrain::Interpolate) {
+        fill_terrain_surface(lev, dst, time);
+    }
+
+    // This also fills the values of dst outside the domain
+    make_terrain_fitted_coords(lev,geom[lev],dst,zlevels_stag[lev],phys_bc_type,
+                               fine_terrain,
+                               (fine_terrain == FineTerrain::Transform) ? &z_phys_interp : nullptr,
+                               (solverChoice.terrain_type == TerrainType::MovingFittedMesh));
+}
+
 void
 ERF::init_zphys (int lev, double elapsed_time)
 {
@@ -954,55 +1068,7 @@ ERF::init_zphys (int lev, double elapsed_time)
 
     if (solverChoice.init_type != InitType::WRFInput && solverChoice.init_type != InitType::Metgrid)
     {
-        if (lev > 0) {
-            //
-            // First interpolate from coarser level if there is one
-            // NOTE: this interpolater assumes that ALL ghost cells of the coarse MultiFab
-            //       have been pre-filled - this includes ghost cells both inside and outside
-            //       the domain
-            //
-            InterpFromCoarseLevel(*z_phys_nd[lev], z_phys_nd[lev]->nGrowVect(),
-                                  IntVect(0,0,0), // do NOT fill ghost cells outside the domain
-                                  *z_phys_nd[lev-1], 0, 0, 1,
-                                  geom[lev-1], geom[lev],
-                                  refRatio(lev-1), &node_bilinear_interp,
-                                  domain_bcs_type, BCVars::cons_bc);
-        }
-
-        //
-        // The STF and Sullivan TF transformations are only defined on a level that
-        // spans the full column, so on a fine level we build the mesh from the one
-        // just interpolated from the coarse level instead.  "interpolate" uses that
-        // mesh as-is; "transform" additionally reads the terrain at the fine
-        // resolution and blends it in with a correction that decays with height.
-        //
-        ParmParse pp("erf");
-        int terrain_smoothing = 0;
-        pp.query("terrain_smoothing", terrain_smoothing);
-
-        FineTerrain fine_terrain = (lev > 0 && terrain_smoothing != 0) ? which_fine_terrain()
-                                                                      : FineTerrain::None;
-
-        //
-        // Save the interpolated mesh before the fine terrain overwrites the k=0 slab,
-        // since the transform is expressed relative to it.  The ghost nodes are
-        // included because the transform corrects the ghost columns as well.
-        //
-        MultiFab z_phys_interp;
-        if (fine_terrain == FineTerrain::Transform) {
-            z_phys_interp.define(z_phys_nd[lev]->boxArray(), z_phys_nd[lev]->DistributionMap(),
-                                 1, z_phys_nd[lev]->nGrowVect());
-            MultiFab::Copy(z_phys_interp, *z_phys_nd[lev], 0, 0, 1, z_phys_nd[lev]->nGrowVect());
-        }
-
-        if (fine_terrain != FineTerrain::Interpolate) {
-            fill_terrain_surface(lev, *z_phys_nd[lev], elapsed_time);
-        }
-
-        make_terrain_fitted_coords(lev,geom[lev],*z_phys_nd[lev],zlevels_stag[lev],phys_bc_type,
-                                   fine_terrain,
-                                   (fine_terrain == FineTerrain::Transform) ? &z_phys_interp : nullptr,
-                                   (solverChoice.terrain_type == TerrainType::MovingFittedMesh));
+        build_zphys_nd(lev, (lev > 0) ? z_phys_nd[lev-1].get() : nullptr, *z_phys_nd[lev], elapsed_time);
 
         z_phys_nd[lev]->FillBoundary(geom[lev].periodicity());
 
@@ -1030,7 +1096,7 @@ ERF::init_zphys (int lev, double elapsed_time)
         // average_down the terrain (see ERF_MakeNewLevel.cpp).
         //
         // If a file IS present at this level, the terrain has already been built from
-        // that file's PH + PHB by init_terrain_from_wrfinput (or its metgrid analogue),
+        // that file's PH + PHB by init_terrain_from_wrfinput (or its metgrid analog),
         // which runs BEFORE this routine on both the from-scratch and the from-coarse
         // paths (init_only precedes init_zphys there because level 0 has to read its
         // terrain and its data in the same pass). Interpolating from the coarse level
@@ -1105,52 +1171,7 @@ ERF::remake_zphys (int lev, Real time, std::unique_ptr<MultiFab>& temp_zphys_nd)
         if (lev == 0) {
             temp_zphys_nd->ParallelCopy(*z_phys_nd[lev], 0, 0, 1, z_phys_nd[lev]->nGrowVect(), z_phys_nd[lev]->nGrowVect());
         } else {
-            //
-            // First interpolate from coarser level
-            // NOTE: this interpolater assumes that ALL ghost cells of the coarse MultiFab
-            //       have been pre-filled - this includes ghost cells both inside and outside
-            //       the domain
-            //
-            InterpFromCoarseLevel(*temp_zphys_nd, z_phys_nd[lev]->nGrowVect(),
-                                  IntVect(0,0,0), // do NOT fill ghost cells outside the domain
-                                  *z_phys_nd[lev-1], 0, 0, 1,
-                                  geom[lev-1], geom[lev],
-                                  refRatio(lev-1), &node_bilinear_interp,
-                                  domain_bcs_type, BCVars::cons_bc);
-
-            //
-            // On a fine level with STF or Sullivan TF we have to rebuild the mesh the
-            // same way init_zphys() did, since make_terrain_fitted_coords() cannot
-            // apply the transformation to a level that does not span the full column
-            //
-            ParmParse pp("erf");
-            int terrain_smoothing = 0;
-            pp.query("terrain_smoothing", terrain_smoothing);
-
-            FineTerrain fine_terrain = (terrain_smoothing != 0) ? which_fine_terrain()
-                                                                : FineTerrain::None;
-
-            MultiFab z_phys_interp;
-            if (fine_terrain == FineTerrain::Transform) {
-                z_phys_interp.define(temp_zphys_nd->boxArray(), temp_zphys_nd->DistributionMap(),
-                                     1, temp_zphys_nd->nGrowVect());
-                // Ghost nodes included: the transform corrects the ghost columns too
-                MultiFab::Copy(z_phys_interp, *temp_zphys_nd, 0, 0, 1, temp_zphys_nd->nGrowVect());
-            }
-
-            // As in init_zphys, every mode except Interpolate builds on the terrain at the
-            //    fine resolution rather than the surface interpolated from the coarse level
-            if (fine_terrain != FineTerrain::Interpolate) {
-                fill_terrain_surface(lev, *temp_zphys_nd, time);
-            }
-
-            // This recomputes the fine values using the bottom terrain at the fine resolution,
-            //    and also fills values of z_phys_nd outside the domain
-            make_terrain_fitted_coords(lev,geom[lev],*temp_zphys_nd,zlevels_stag[lev],phys_bc_type,
-                                       fine_terrain,
-                                       (fine_terrain == FineTerrain::Transform) ? &z_phys_interp : nullptr,
-                                       (solverChoice.terrain_type == TerrainType::MovingFittedMesh));
-
+            build_zphys_nd(lev, z_phys_nd[lev-1].get(), *temp_zphys_nd, time);
         } // lev > 0
 
         std::swap(temp_zphys_nd, z_phys_nd[lev]);
@@ -1209,7 +1230,7 @@ ERF::remake_zphys (int lev, Real time, std::unique_ptr<MultiFab>& temp_zphys_nd)
 /**
  * The immersed terrain's (or buildings') solid fraction on level lev, one minus the EB volume
  * fraction, with fractions below eb2.small_volfrac (almost fluid cells) set to zero in the valid
- * cells and in the ghost cells FillBoundary fills; with the face-centred factories, the same on
+ * cells and in the ghost cells FillBoundary fills; with the face-centered factories, the same on
  * the faces. A fresh start, a regrid and a restart all build it here, so a restarted run forces
  * the same cells as the run it continues. On levels coarser than the building cutoff, all
  * allocated masks are zero.
@@ -1401,6 +1422,24 @@ ERF::make_physbcs (int lev)
                                                             l_use_real_bcs, zvel_bc_data[lev].data());
     // the terrain-following inflow profiles of the lateral faces (xlo.inflow_profile)
     physbcs_cons[lev]->set_inflow_profiles(&m_inflow_profiles);
+    // the lateral inflow faces of a pseudo-incompressible level that give a primitive theta
+    //    (<face>.theta, or a theta dirichlet_file read as primitive): see set_pi_inflow_faces
+    {
+        GpuArray<int,AMREX_SPACEDIM*2>  pi_face{};
+        GpuArray<Real,AMREX_SPACEDIM*2> pi_theta{};
+        if (solverChoice.compressibility_type[lev] == CompressibilityType::PseudoIncompressible) {
+            for (OrientationIter oit; oit; ++oit) {
+                const Orientation ori = oit();
+                pi_face[ori] = pi_theta_inflow_face(ori);
+                if (pi_face[ori] == 0) { continue; }
+                pi_theta[ori] = m_bc_extdir_vals[BCVars::RhoTheta_bc_comp][ori];
+                if (m_th_file_face[ori] != 2 && !(pi_theta[ori] > Real(0.0))) {
+                    Abort("The inflow theta of a pseudo-incompressible face must be positive");
+                }
+            }
+        }
+        physbcs_cons[lev]->set_pi_inflow_faces(pi_face, pi_theta);
+    }
     physbcs_u[lev]->set_inflow_profiles(&m_inflow_profiles);
     physbcs_v[lev]->set_inflow_profiles(&m_inflow_profiles);
     const bool moving_mesh = (solverChoice.terrain_type == TerrainType::MovingFittedMesh);

@@ -15,8 +15,8 @@ verify_erf_dir() {
     # Check for "Energy Research and Forecasting" in key files
     local found=0
 
-    if [ -f "$dir/README.rst" ]; then
-        if grep -q "Energy Research and Forecasting" "$dir/README.rst" 2>/dev/null || true; then
+    if [ -f "$dir/README.md" ]; then
+        if grep -q "Energy Research and Forecasting" "$dir/README.md" 2>/dev/null || true; then
             found=1
         fi
     fi
@@ -89,7 +89,7 @@ if [ $# -lt 1 ] || [ $# -gt 3 ]; then
     echo "Sets:"
     echo "  default    - Scripts from Build/"
     echo "  perlmutter - Scripts from Build/Perlmutter/"
-    echo "  gnu_ekat   - Scripts from Build/GNU_Ekat/"
+    echo "  gnu_kokkos - Scripts from Build/GNU_Kokkos/"
     echo ""
     echo "If script_pattern is provided, creates build_<pattern>/"
     echo "Otherwise creates build_<set>/"
@@ -109,7 +109,7 @@ if [ -n "$ERF_DIR_ARG" ]; then
     echo "Using provided ERF_DIR: $ERF_DIR"
     if ! verify_erf_dir "$ERF_DIR"; then
         echo "Error: Provided directory is not a valid ERF repository"
-        echo "Must contain 'Energy Research and Forecasting' in README.rst, LICENSE.md, or CITATION.cff"
+        echo "Must contain 'Energy Research and Forecasting' in README.md, LICENSE.md, or CITATION.cff"
         exit 1
     fi
 else
@@ -119,7 +119,7 @@ else
         echo ""
         echo "Verification checks for:"
         echo "  - CMakeLists.txt and Source/ directory"
-        echo "  - 'Energy Research and Forecasting' in README.rst, LICENSE.md, or CITATION.cff"
+        echo "  - 'Energy Research and Forecasting' in README.md, LICENSE.md, or CITATION.cff"
         exit 1
     fi
 fi
@@ -129,7 +129,7 @@ echo "ERF_DIR set to: $ERF_DIR"
 # Define source directories relative to ERF_DIR
 DEFAULT_DIR="$ERF_DIR/Build"
 PERLMUTTER_DIR="$ERF_DIR/Build/Perlmutter"
-GNU_EKAT_DIR="$ERF_DIR/Build/GNU_Ekat"
+GNU_KOKKOS_DIR="$ERF_DIR/Build/GNU_Kokkos"
 
 case $SET in
     default)
@@ -138,12 +138,12 @@ case $SET in
     perlmutter)
         SRC_DIR="$PERLMUTTER_DIR"
         ;;
-    gnu_ekat)
-        SRC_DIR="$GNU_EKAT_DIR"
+    gnu_kokkos)
+        SRC_DIR="$GNU_KOKKOS_DIR"
         ;;
     *)
         echo "Error: Invalid set '$SET'"
-        echo "Choose: default, perlmutter, or gnu_ekat"
+        echo "Choose: default, perlmutter, or gnu_kokkos"
         exit 1
         ;;
 esac

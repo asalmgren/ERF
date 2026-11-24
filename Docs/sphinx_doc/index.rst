@@ -3,7 +3,7 @@
 ERF
 ---
 
-ERF solves the governing equations for atmopsheric dynamics in a fully compressible form or using the anelastic approximation.
+ERF solves the governing equations for atmospheric dynamics in a fully compressible form or using the anelastic or pseudo-incompressible approximation.
 
 ERF is built on `AMReX <https://github.com/AMReX-Codes/amrex>`_,
 an adaptive mesh refinement software framework, which provides the underlying software infrastructure
@@ -70,6 +70,7 @@ In addition to this documentation, there is API documentation for ERF generated 
    theory/Forcings.rst
    theory/WindFarmModels.rst
    theory/FireCoupling.rst
+   theory/FloodCoupling.rst
    theory/ActuatorCore.rst
    theory/StructureCoupling.rst
    theory/DustCoupling.rst

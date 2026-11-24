@@ -637,7 +637,17 @@ whose boxes are split in z, and check that the wall distance is the height
 above the bottom wall. ``RANS_Neutral_Hill_2D_Realizability`` runs the
 ridge twice, without and with the realizability cap of the closure
 (``erf.rans_realizability``), and pins the capped viscosity and diffusivity
-to their closed form cell by cell (``check_realizability.py``). The flat cases run with the MLMG projection
+to their closed form cell by cell (``check_realizability.py``).
+``RANS_Neutral_ABL_Flat_LogShear`` runs the neutral flat case for one step from a
+logarithmic wind profile with ``erf.rans_shear_stencil = central`` and with
+``log_law``, and pins the shear of the closure to each stencil, to
+:math:`u_*/(\kappa (z + z_0))` for ``log_law``, and the difference of the
+production of k to the difference of the two shears (``check_log_shear.py``).
+``RANS_Neutral_ABL_Flat_LogShear_Stretched`` repeats the pair on stretched
+layers with boxes cut in the vertical, and
+``RANS_Neutral_ABL_Flat_LogShear_Fitted`` on a terrain-fitted mesh over flat
+ground, so that each mesh branch of the strain calculation is run.
+The flat cases run with the MLMG projection
 (``erf.use_fft=false``); the terrain-fitted cases need the FFT-preconditioned
 projection and are registered only when the build enables FFT
 (``ERF_ENABLE_FFT``).
@@ -668,7 +678,7 @@ no gold file; label ``restart-parity``). Every run has a time limit of its own,
 so a restart whose first step never finishes fails with a message. Until
 September 2026 the restart path handed the microphysics its minimum cell
 height only on terrain-fitted meshes; on a constant-dz mesh the sedimentation
-substep count of the first restarted step was computed from an uninitialised
+substep count of the first restarted step was computed from an uninitialized
 value and the step never finished. Only the schemes that size their
 sedimentation substeps from that height are affected, namely Kessler
 (``ERF_Kessler.cpp``) and SAM (``ERF_PrecipFall.cpp``, ``ERF_IceFall.cpp``);
@@ -826,7 +836,7 @@ Mass Source
 -----------
 The ``MassSource_*`` tests (with Python, not Windows) check the localized mass source
 (:ref:`sec:MassSourceInputs`). The ``MassSource`` deck injects a constant 1.0e4 kg/s, with the
-tracer on, from the cells within 100 m of the centre of a closed 1 km x 1 km x 500 m box (slip
+tracer on, from the cells within 100 m of the center of a closed 1 km x 1 km x 500 m box (slip
 walls on all six faces) and less than 100 m above the ground, for 20 fully compressible steps.
 Nothing enters or leaves, so ``Tests/check_mass_source.py`` requires the domain mass ERF prints
 to grow by the mass injected and the tracer integral, zero at the start, to equal it, both to

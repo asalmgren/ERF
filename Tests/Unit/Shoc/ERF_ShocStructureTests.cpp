@@ -211,7 +211,6 @@ TEST(SolverChoice, NativeStateUpdateOwnsNoVerticalDiffusion)
 {
     SolverChoice choice;
     choice.use_native_shoc = true;
-    choice.use_eamxx_shoc = false;
     choice.shoc_transport_mode = ShocTransportMode::StateUpdate;
     choice.shoc_momentum_transport = ShocMomentumTransport::StateUpdate;
 
@@ -223,7 +222,6 @@ TEST(SolverChoice, NativeMomentumNoneLeavesHostMomentumOwnership)
 {
     SolverChoice choice;
     choice.use_native_shoc = true;
-    choice.use_eamxx_shoc = false;
     choice.shoc_transport_mode = ShocTransportMode::StateUpdate;
     choice.shoc_momentum_transport = ShocMomentumTransport::None;
 
@@ -235,20 +233,9 @@ TEST(SolverChoice, NonNativeShocRetainsGenericHostOwnership)
 {
     SolverChoice choice;
     choice.use_native_shoc = false;
-    choice.use_eamxx_shoc = false;
 
     EXPECT_TRUE(choice.host_owns_vertical_scalar_diffusion());
     EXPECT_TRUE(choice.host_owns_vertical_momentum_diffusion());
-}
-
-TEST(SolverChoice, EamxxShocRetainsExistingOwnership)
-{
-    SolverChoice choice;
-    choice.use_native_shoc = false;
-    choice.use_eamxx_shoc = true;
-
-    EXPECT_FALSE(choice.host_owns_vertical_scalar_diffusion());
-    EXPECT_FALSE(choice.host_owns_vertical_momentum_diffusion());
 }
 
 TEST(ShocStructure, SurfaceLayerUsesUstarFloorAndFiniteObukhov)
@@ -671,6 +658,41 @@ TEST(ShocStructure, LengthScaleRespectsBoundsAndBruntIsFinite)
         EXPECT_GE(mix(0,k,0), 20.0);
         EXPECT_LE(mix(0,k,0), std::sqrt(400.0 * 900.0));
     }
+}
+
+// Motivation: the horizontal length cap must use the physical cell size sqrt(dx dy / (m_x m_y)),
+// so a column with uniform map factor m matches one on a mesh m times finer with no map factors.
+TEST(ShocStructure, LengthCapUsesPhysicalCellSizeWithMapFactors)
+{
+    const amrex::Real m = 2.0;
+    const amrex::Real dx_comp = 60.0;
+    auto mapped = shoc_test::make_column(6);
+    auto fine = shoc_test::make_column(6);
+    auto coarse = shoc_test::make_column(6);
+    shoc::set_fab_val(mapped.mf_area, m * m, shoc::InitRunOn::Host);
+    ShocRuntimeOptions opts;
+
+    shoc_test::run_and_sync([&] {
+        for (auto* col : {&mapped, &fine, &coarse}) {
+            ShocStructure::diagnose_surface_layer(*col);
+            ShocStructure::diagnose_pblh(*col);
+        }
+        ShocStructure::diagnose_length_and_brunt(mapped, opts, dx_comp, dx_comp);
+        ShocStructure::diagnose_length_and_brunt(fine, opts, dx_comp / m, dx_comp / m);
+        ShocStructure::diagnose_length_and_brunt(coarse, opts, dx_comp, dx_comp);
+    });
+
+    const auto mapped_mix = mapped.shoc_mix.const_array();
+    const auto fine_mix = fine.shoc_mix.const_array();
+    const auto coarse_mix = coarse.shoc_mix.const_array();
+    bool cap_binds = false;
+    for (int k = 0; k < mapped.layout.nlev; ++k) {
+        EXPECT_NEAR(mapped_mix(0,k,0), fine_mix(0,k,0), 1.0e-12);
+        EXPECT_LE(mapped_mix(0,k,0), dx_comp / m + 1.0e-12);
+        if (coarse_mix(0,k,0) > mapped_mix(0,k,0) + 1.0e-6) { cap_binds = true; }
+    }
+    // Otherwise the test would not see the map factors at all
+    EXPECT_TRUE(cap_binds);
 }
 
 TEST(ShocStructure, StableColumnHasPositiveBruntInBottomUpErfOrdering)

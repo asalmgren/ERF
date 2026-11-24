@@ -89,7 +89,7 @@ Build Steps
 
 **1. Clone Repository and Populate Dependencies**
 
-See :ref:`Submodules` for more details. All dependencies except EAMxx SHOC are provided as git submodules:
+See :ref:`Submodules` for more details. All dependencies are provided as git submodules:
 
 .. code-block:: bash
 
@@ -112,20 +112,7 @@ The GNU Make system uses the AMReX submodule path by default. To use an external
    # Or for tcsh
    setenv AMREX_HOME /path/to/external/amrex
 
-**2. Setup for EAMxx SHOC (Optional)**
-
-If building with EAMxx SHOC, run the setup scripts:
-
-.. code-block:: bash
-
-   export ERF_DIR=/path/to/ERF
-   source /path/to/ERF/Build/GNU_Ekat/eamxx_clone.sh
-   source /path/to/ERF/Build/GNU_Ekat/ekat_build_commands.sh
-
-Native SHOC is always built in tree and selected at runtime with ``erf.pbl_type = NATIVE_SHOC``.
-Set ``USE_EAMXX_SHOC=TRUE`` in your GNUmakefile (step 4) if you need that optional package.
-
-**3. Navigate to GNU Make Build Directory**
+**2. Navigate to GNU Make Build Directory**
 
 .. code-block:: bash
 
@@ -135,7 +122,7 @@ Set ``USE_EAMXX_SHOC=TRUE`` in your GNUmakefile (step 4) if you need that option
    # Development-test workflow (exception)
    # cd ERF/.Exec_dev/<test_name>
 
-**4. Edit GNUmakefile**
+**3. Edit GNUmakefile**
 
 Set build variables in the ``GNUmakefile``:
 
@@ -195,6 +182,14 @@ Set build variables in the ``GNUmakefile``:
         - Fire engine directories to compile in, space separated, each with a ``Make.package`` (needs ``USE_FIRE=TRUE``; for an engine repository that holds ERF as a submodule, see :ref:`sec:FireCoupling`)
         - (none)
         - paths
+      * - ``USE_FLOOD``
+        - Enables the flood coupling (atmosphere side; flood engines plug into it, see :ref:`sec:FloodCoupling`)
+        - FALSE
+        - TRUE/FALSE
+      * - ``FLOOD_HOME``
+        - Flood engine directories to compile in, space separated, each with a ``Make.package`` (needs ``USE_FLOOD=TRUE``; see :ref:`sec:FloodCoupling`)
+        - (none)
+        - paths
       * - ``USE_MOVING_BODIES``
         - Enables the actuator core for bodies in the flow (velocity sampling at points, force spreading onto the momentum sources; see :ref:`sec:ActuatorCore`) and the structure coupling (see :ref:`sec:StructureCoupling`)
         - FALSE
@@ -227,10 +222,6 @@ Set build variables in the ``GNUmakefile``:
         - Builds the in-tree SHOC path and selects it at runtime with ``erf.pbl_type = NATIVE_SHOC``
         - Always built
         - N/A
-      * - ``USE_EAMXX_SHOC``
-        - Enables optional EAMxx SHOC turbulence model (sets ``USE_KOKKOS=TRUE``)
-        - FALSE
-        - TRUE/FALSE
       * - ``USE_MULTIBLOCK``
         - Enables multiblock capability
         - FALSE
@@ -293,7 +284,7 @@ Set build variables in the ``GNUmakefile``:
    .. literalinclude:: ../../Exec/GNUmakefile
       :language: makefile
 
-**5. Build**
+**4. Build**
 
 .. code-block:: bash
 
@@ -301,7 +292,7 @@ Set build variables in the ``GNUmakefile``:
 
 The executable name encodes build characteristics (dimensionality, compiler, parallelization). For example, in ``Exec`` with ``COMP=gnu`` and ``USE_MPI=TRUE``, the executable is ``ERF3d.gnu.MPI.ex``. Multiple build configurations can coexist in the same directory.
 
-**6. Verify Build (Optional)**
+**5. Verify Build (Optional)**
 
 View build configuration:
 
@@ -414,19 +405,7 @@ Clone with submodules:
    # Or populate submodules in existing clone
    git submodule update --init --recursive
 
-**2. Setup for EAMxx SHOC (Optional)**
-
-If building with EAMxx SHOC:
-
-.. code-block:: bash
-
-   export ERF_DIR=/path/to/ERF
-   source /path/to/ERF/Build/GNU_Ekat/eamxx_clone.sh
-
-Native SHOC is always built in tree; select it at runtime with ``erf.pbl_type = NATIVE_SHOC``.
-Configure with ``-DERF_ENABLE_EAMXX_SHOC=ON`` (step 4) if you need that optional package.
-
-**3. Choose Build Workflow**
+**2. Choose Build Workflow**
 
 ERF supports multiple CMake workflows. The main difference is directory structure and whether you use the install step.
 
@@ -522,7 +501,7 @@ ERF supports multiple CMake workflows. The main difference is directory structur
    * Running multiple configurations → separate build directories
    * Minimal typing from repository root → use script with -B/-S
 
-**4. Configure with Options**
+**3. Configure with Options**
 
 For manual configuration, use ``-D<VARIABLE>=<VALUE>`` syntax:
 
@@ -596,6 +575,14 @@ CMake can also generate makefiles for the Ninja build system for faster compilat
      - Fire engine directories to compile in, a CMake list, each with an ``ERFFireEngine.cmake`` (needs ``ERF_ENABLE_FIRE=ON``; set by an engine repository that holds ERF as a submodule, and left unset when that repository uses ERF as a library; see :ref:`sec:FireCoupling`)
      - (none)
      - paths
+   * - ``ERF_ENABLE_FLOOD``
+     - Enables the flood coupling (atmosphere side; flood engines plug into it, see :ref:`sec:FloodCoupling`)
+     - OFF
+     - ON/OFF
+   * - ``ERF_FLOOD_ENGINE_DIRS``
+     - Flood engine directories to compile in, a CMake list, each with an ``ERFFloodEngine.cmake`` (needs ``ERF_ENABLE_FLOOD=ON``; see :ref:`sec:FloodCoupling`)
+     - (none)
+     - paths
    * - ``ERF_ENABLE_MOVING_BODIES``
      - Enables the actuator core for bodies in the flow (velocity sampling at points, force spreading onto the momentum sources; see :ref:`sec:ActuatorCore`) and the structure coupling (see :ref:`sec:StructureCoupling`)
      - OFF
@@ -640,10 +627,6 @@ CMake can also generate makefiles for the Ninja build system for faster compilat
      - Builds the in-tree SHOC path and selects it at runtime with ``erf.pbl_type = NATIVE_SHOC``
      - Always built
      - N/A
-   * - ``ERF_ENABLE_EAMXX_SHOC``
-     - Enables optional EAMxx SHOC turbulence model (requires ``ERF_ENABLE_MPI=ON`` and EKAT/Kokkos/EAMxx dependencies)
-     - OFF
-     - ON/OFF
    * - ``ERF_ENABLE_WSM6_FORT``
      - Enables Fortran bridge for WSM6 microphysics (requires ``ERF_PRECISION=DOUBLE``)
      - OFF
@@ -688,18 +671,12 @@ CMake can also generate makefiles for the Ninja build system for faster compilat
    * ``ERF_ENABLE_RRTMGP`` - RRTMGP radiation model
 
      - Requires ``ERF_ENABLE_NETCDF=ON`` and ``ERF_ENABLE_MPI=ON``
-     - Automatically enables ``ERF_ENABLE_EKAT=ON`` (provides Kokkos)
+     - Automatically enables Kokkos, from ``Submodules/kokkos`` or from the install that ``-DKokkos_ROOT`` points at
 
    * Native SHOC - Native SHOC turbulence and cloud macrophysics
 
      - Always built
      - Selected at runtime with ``erf.pbl_type = NATIVE_SHOC``
-
-   * ``ERF_ENABLE_EAMXX_SHOC`` - Optional EAMxx SHOC turbulence and cloud macrophysics
-
-     - Requires ``ERF_ENABLE_MPI=ON``
-     - Automatically enables ``ERF_ENABLE_EKAT=ON`` (provides Kokkos)
-     - Additional step: Run ``source Build/GNU_Ekat/eamxx_clone.sh``
 
    * ``ERF_ENABLE_NOAHMP`` - NOAHMP land surface model
 
@@ -714,7 +691,7 @@ CMake can also generate makefiles for the Ninja build system for faster compilat
    * ``ERF_ENABLE_SYCL`` - Intel GPUs
 
    .. note::
-      Kokkos-based physics packages (RRTMGP, EAMxx SHOC) support all three GPU backends through EKAT's Kokkos integration.
+      The Kokkos-based RRTMGP radiation package supports all three GPU backends through Kokkos.
 
 .. dropdown:: Logging Options (CMake 3.25+)
    :icon: bug
@@ -817,7 +794,7 @@ CMake can also generate makefiles for the Ninja build system for faster compilat
    .. code-block:: bash
 
       cd Build
-      ./setup_cmake_validation.sh default    # or perlmutter, gnu_ekat
+      ./setup_cmake_validation.sh default    # or perlmutter, gnu_kokkos
       cd ../build_default
       ./run.sh     # List available scripts
       ./run.sh 1   # Run first script

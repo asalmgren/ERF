@@ -2,6 +2,7 @@
 #include "ERF_ShocImplicit.H"
 
 #include "ERF_IndexDefines.H"
+#include "ERF_LengthScaleCellSize.H"
 
 #include <AMReX_BLProfiler.H>
 #include <AMReX_Gpu.H>
@@ -29,8 +30,7 @@ shoc_boxarray_spans_full_height (const BoxArray& ba, const Box& domain)
     return true;
 }
 
-namespace
-{
+namespace erf_detail_ShocDriver {
     constexpr int k_shoc_vertical_diff_comp = EddyDiff::Mom_v;
     constexpr int k_shoc_vertical_diff_count = EddyDiff::Q_v - EddyDiff::Mom_v + 1;
 
@@ -303,6 +303,7 @@ namespace
         }
     }
 }
+using namespace erf_detail_ShocDriver;
 
 ShocDriver::ShocDriver (int lev, const SolverChoice& solver_choice)
     : m_lev(lev),
@@ -485,7 +486,9 @@ ShocDriver::advance (MultiFab& cons,
                      MultiFab* eddy_diffs,
                      MultiFab& z_phys_nd,
                      const Geometry& geom,
-                     double dt)
+                     double dt,
+                     const MultiFab* mf_m_x,
+                     const MultiFab* mf_m_y)
 {
     BL_PROFILE("SHOC::advance");
 
@@ -552,6 +555,18 @@ ShocDriver::advance (MultiFab& cons,
                                          hfx3, qfx3, tau13, tau23, z_phys_nd, geom,
                                          m_moisture_indices);
         }
+        // m_x m_y of each column, for the physical cell size of the mixing-length cap
+        {
+            bool has_mf   = (mf_m_x && mf_m_y);
+            const auto mx = (has_mf) ? mf_m_x->const_array(mfi) : Array4<const Real> {};
+            const auto my = (has_mf) ? mf_m_y->const_array(mfi) : Array4<const Real> {};
+            auto mf_area = col.mf_area.array();
+            const auto layout = col.layout;
+            ParallelFor(makeSlab(vbx, 2, vbx.smallEnd(2)), [=] AMREX_GPU_DEVICE (int i, int j, int) noexcept
+            {
+                mf_area(shoc_column_index(layout, i, j),0,0) = (has_mf) ? mx(i,j,0) * my(i,j,0) : Real(1.0);
+            });
+        }
         {
             BL_PROFILE("SHOC::advance::seed_carried_buoyancy_flux");
             seed_carried_buoyancy_flux(col, mfi);
@@ -560,7 +575,9 @@ ShocDriver::advance (MultiFab& cons,
             BL_PROFILE("SHOC::advance::seed_carried_turbulence");
             seed_carried_turbulence(col, mfi, cons, *eddy_diffs);
         }
-        const auto dx = geom.CellSizeArray();
+        // The mixing-length cap sqrt(dx dy) takes dx in place of a dy over one cell, and the
+        // reverse; a single column keeps the dx and dy of the inputs
+        const auto dx = LengthScaleCellSize(geom);
         BL_PROFILE("SHOC::advance::cache_baseline_state");
         ShocImplicit::cache_baseline_state(col);
         ShocDiagnostics::diagnose_pre_implicit(col, m_opts, dx[0], dx[1], dt);

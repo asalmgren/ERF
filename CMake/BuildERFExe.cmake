@@ -39,86 +39,6 @@ function(erf_add_native_shoc_sources target)
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/Source/PBL/Shoc>)
 endfunction()
 
-function(erf_add_eamxx_shoc_sources target)
-  set(EAMXX_SRC ${PROJECT_SOURCE_DIR}/external/E3SM/components/eamxx/src)
-  set(ERF_EAMXX_IFACE ${PROJECT_SOURCE_DIR}/Source/PhysicsInterfaces/Shoc)
-
-  target_include_directories(${target} PUBLIC
-    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/Source/PhysicsInterfaces>
-    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/Source/PhysicsInterfaces/Shoc>
-    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/Submodules/ekat/src/pack>
-    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/Submodules/ekat/src/algorithm>
-    $<BUILD_INTERFACE:${EAMXX_SRC}>
-    $<BUILD_INTERFACE:${EAMXX_SRC}/physics>
-    $<BUILD_INTERFACE:${EAMXX_SRC}/physics/share>
-    $<BUILD_INTERFACE:${EAMXX_SRC}/physics/shoc>
-    $<BUILD_INTERFACE:${EAMXX_SRC}/physics/shoc/eti>
-    $<BUILD_INTERFACE:${EAMXX_SRC}/physics/shoc/impl>
-  )
-
-  target_sources(${target} PRIVATE
-    ${ERF_EAMXX_IFACE}/ERF_ShocInterface.cpp
-    ${EAMXX_SRC}/physics/share/physics_saturation.cpp
-    ${EAMXX_SRC}/physics/shoc/disp/shoc_assumed_pdf_disp.cpp
-    ${EAMXX_SRC}/physics/shoc/disp/shoc_check_tke_disp.cpp
-    ${EAMXX_SRC}/physics/shoc/disp/shoc_compute_shoc_temperature_disp.cpp
-    ${EAMXX_SRC}/physics/shoc/disp/shoc_compute_shoc_vapor_disp.cpp
-    ${EAMXX_SRC}/physics/shoc/disp/shoc_diag_obklen_disp.cpp
-    ${EAMXX_SRC}/physics/shoc/disp/shoc_diag_second_shoc_moments_disp.cpp
-    ${EAMXX_SRC}/physics/shoc/disp/shoc_diag_third_shoc_moments_disp.cpp
-    ${EAMXX_SRC}/physics/shoc/disp/shoc_energy_fixer_disp.cpp
-    ${EAMXX_SRC}/physics/shoc/disp/shoc_energy_integrals_disp.cpp
-    ${EAMXX_SRC}/physics/shoc/disp/shoc_grid_disp.cpp
-    ${EAMXX_SRC}/physics/shoc/disp/shoc_length_disp.cpp
-    ${EAMXX_SRC}/physics/shoc/disp/shoc_pblintd_disp.cpp
-    ${EAMXX_SRC}/physics/shoc/disp/shoc_tke_disp.cpp
-    ${EAMXX_SRC}/physics/shoc/disp/shoc_update_host_dse_disp.cpp
-    ${EAMXX_SRC}/physics/shoc/disp/shoc_update_prognostics_implicit_disp.cpp
-    ${EAMXX_SRC}/physics/shoc/eti/shoc_adv_sgs_tke.cpp
-    ${EAMXX_SRC}/physics/shoc/eti/shoc_assumed_pdf.cpp
-    ${EAMXX_SRC}/physics/shoc/eti/shoc_calc_shoc_varorcovar.cpp
-    ${EAMXX_SRC}/physics/shoc/eti/shoc_calc_shoc_vertflux.cpp
-    ${EAMXX_SRC}/physics/shoc/eti/shoc_check_length_scale_shoc_length.cpp
-    ${EAMXX_SRC}/physics/shoc/eti/shoc_check_tke.cpp
-    ${EAMXX_SRC}/physics/shoc/eti/shoc_clipping_diag_third_shoc_moments.cpp
-    ${EAMXX_SRC}/physics/shoc/eti/shoc_compute_brunt_shoc_length.cpp
-    ${EAMXX_SRC}/physics/shoc/eti/shoc_compute_diag_third_shoc_moment.cpp
-    ${EAMXX_SRC}/physics/shoc/eti/shoc_compute_l_inf_shoc_length.cpp
-    ${EAMXX_SRC}/physics/shoc/eti/shoc_compute_shoc_mix_shoc_length.cpp
-    ${EAMXX_SRC}/physics/shoc/eti/shoc_compute_shoc_temperature.cpp
-    ${EAMXX_SRC}/physics/shoc/eti/shoc_compute_shoc_vapor.cpp
-    ${EAMXX_SRC}/physics/shoc/eti/shoc_compute_shr_prod.cpp
-    ${EAMXX_SRC}/physics/shoc/eti/shoc_compute_tmpi.cpp
-    ${EAMXX_SRC}/physics/shoc/eti/shoc_diag_obklen.cpp
-    ${EAMXX_SRC}/physics/shoc/eti/shoc_diag_second_moments.cpp
-    ${EAMXX_SRC}/physics/shoc/eti/shoc_diag_second_moments_lbycond.cpp
-    ${EAMXX_SRC}/physics/shoc/eti/shoc_diag_second_moments_srf.cpp
-    ${EAMXX_SRC}/physics/shoc/eti/shoc_diag_second_moments_ubycond.cpp
-    ${EAMXX_SRC}/physics/shoc/eti/shoc_diag_second_shoc_moments.cpp
-    ${EAMXX_SRC}/physics/shoc/eti/shoc_diag_third_shoc_moments.cpp
-    ${EAMXX_SRC}/physics/shoc/eti/shoc_dp_inverse.cpp
-    ${EAMXX_SRC}/physics/shoc/eti/shoc_eddy_diffusivities.cpp
-    ${EAMXX_SRC}/physics/shoc/eti/shoc_energy_fixer.cpp
-    ${EAMXX_SRC}/physics/shoc/eti/shoc_energy_integrals.cpp
-    ${EAMXX_SRC}/physics/shoc/eti/shoc_grid.cpp
-    ${EAMXX_SRC}/physics/shoc/eti/shoc_integ_column_stability.cpp
-    ${EAMXX_SRC}/physics/shoc/eti/shoc_isotropic_ts.cpp
-    ${EAMXX_SRC}/physics/shoc/eti/shoc_linear_interp.cpp
-    ${EAMXX_SRC}/physics/shoc/eti/shoc_length.cpp
-    ${EAMXX_SRC}/physics/shoc/eti/shoc_main.cpp
-    ${EAMXX_SRC}/physics/shoc/eti/shoc_pblintd.cpp
-    ${EAMXX_SRC}/physics/shoc/eti/shoc_pblintd_check_pblh.cpp
-    ${EAMXX_SRC}/physics/shoc/eti/shoc_pblintd_cldcheck.cpp
-    ${EAMXX_SRC}/physics/shoc/eti/shoc_pblintd_height.cpp
-    ${EAMXX_SRC}/physics/shoc/eti/shoc_pblintd_init_pot.cpp
-    ${EAMXX_SRC}/physics/shoc/eti/shoc_pblintd_surf_temp.cpp
-    ${EAMXX_SRC}/physics/shoc/eti/shoc_tridiag_solver.cpp
-    ${EAMXX_SRC}/physics/shoc/eti/shoc_tke.cpp
-    ${EAMXX_SRC}/physics/shoc/eti/shoc_update_host_dse.cpp
-    ${EAMXX_SRC}/physics/shoc/eti/shoc_update_prognostics_implicit.cpp
-  )
-endfunction()
-
 function(build_erf_lib erf_lib_name)
 
   set(SRC_DIR ${PROJECT_SOURCE_DIR}/Source)
@@ -157,13 +77,10 @@ function(build_erf_lib erf_lib_name)
       PROPERTIES COMPILE_OPTIONS "-fdefault-real-8;-fdefault-double-8")
   endif()
 
-  # NOTE: EKAT provides KOKKOS
-  if(ERF_ENABLE_EKAT)
+  if(ERF_ENABLE_KOKKOS)
     target_compile_definitions(${erf_lib_name} PUBLIC ERF_USE_KOKKOS)
     target_include_directories(${erf_lib_name} PUBLIC
                                $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/Source/PhysicsInterfaces>
-                               $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/Submodules/ekat/src/pack>
-                               $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/Submodules/ekat/src/algorithm>
                               )
   endif()
 
@@ -290,12 +207,6 @@ function(build_erf_lib erf_lib_name)
   erf_add_native_shoc_sources(${erf_lib_name})
   target_compile_definitions(${erf_lib_name} PUBLIC ERF_HAS_SHOC_FAMILY)
 
-  if(ERF_ENABLE_EAMXX_SHOC)
-    erf_add_eamxx_shoc_sources(${erf_lib_name})
-    target_compile_definitions(${erf_lib_name} PUBLIC ERF_USE_EAMXX_SHOC)
-    target_compile_definitions(${erf_lib_name} PUBLIC SCREAM_SHOC_SMALL_KERNELS)
-  endif()
-
   # Shared Fortran support modules. module_libmassv and mp_radar exist as
   # byte-identical copies under WSM6 and WDM6, and module_model_constants under
   # Morrison and WDM6. Adding two copies to one target compiles the same module
@@ -411,6 +322,41 @@ function(build_erf_lib erf_lib_name)
     endforeach()
   elseif(ERF_FIRE_ENGINE_DIRS)
     message(FATAL_ERROR "ERF_FIRE_ENGINE_DIRS is set but ERF_ENABLE_FIRE is OFF")
+  endif()
+
+  if(ERF_ENABLE_FLOOD)
+    # The flood coupling, atmosphere side, shared by every flood engine
+    target_sources(${erf_lib_name} PRIVATE
+      ${SRC_DIR}/FloodCoupling/ERF_FloodCoupler.cpp
+      ${SRC_DIR}/FloodCoupling/ERF_FloodCouplingParams.cpp
+      ${SRC_DIR}/FloodCoupling/ERF_FloodEngineRegistry.cpp
+      ${SRC_DIR}/FloodCoupling/ERF_FloodGrid.cpp
+      ${SRC_DIR}/FloodCoupling/ERF_FloodPrerequisites.cpp
+    )
+    target_include_directories(${erf_lib_name} PUBLIC $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/Source/FloodCoupling>)
+    target_compile_definitions(${erf_lib_name} PUBLIC ERF_USE_FLOOD)
+
+    # Flood engines live outside ERF, each in a directory that provides
+    # ERFFloodEngine.cmake defining erf_flood_engine_add(target), called right
+    # after its file is included; ERF_FLOOD_ENGINE_DIR holds the engine's
+    # directory during the call.
+    foreach(_flood_dir IN LISTS ERF_FLOOD_ENGINE_DIRS)
+      get_filename_component(_flood_dir "${_flood_dir}" ABSOLUTE)
+      if(NOT EXISTS "${_flood_dir}/ERFFloodEngine.cmake")
+        message(FATAL_ERROR "ERF_FLOOD_ENGINE_DIRS: ${_flood_dir} has no ERFFloodEngine.cmake")
+      endif()
+      set(ERF_FLOOD_ENGINE_DIR "${_flood_dir}")
+      # A file that does not define erf_flood_engine_add would otherwise call
+      # the one of the directory before it; this definition stops the configure.
+      function(erf_flood_engine_add target)
+        message(FATAL_ERROR "${ERF_FLOOD_ENGINE_DIR}/ERFFloodEngine.cmake does not define erf_flood_engine_add(target)")
+      endfunction()
+      include("${_flood_dir}/ERFFloodEngine.cmake")
+      erf_flood_engine_add(${erf_lib_name})
+      message(STATUS "ERF flood engine directory: ${_flood_dir}")
+    endforeach()
+  elseif(ERF_FLOOD_ENGINE_DIRS)
+    message(FATAL_ERROR "ERF_FLOOD_ENGINE_DIRS is set but ERF_ENABLE_FLOOD is OFF")
   endif()
 
   if(ERF_ENABLE_DUST)
@@ -575,6 +521,7 @@ function(build_erf_lib erf_lib_name)
        ${SRC_DIR}/Initialization/ERF_InitFromInputSounding.cpp
        ${SRC_DIR}/Initialization/ERF_InitGeowind.cpp
        ${SRC_DIR}/Initialization/ERF_InitRayleigh.cpp
+       ${SRC_DIR}/Initialization/ERF_RebuildBaseState.cpp
        ${SRC_DIR}/Initialization/ERF_InitSponge.cpp
        ${SRC_DIR}/Initialization/ERF_Init1D.cpp
        ${SRC_DIR}/Initialization/ERF_InitTurbPert.cpp
@@ -668,6 +615,7 @@ function(build_erf_lib erf_lib_name)
        ${SRC_DIR}/Microphysics/SBM/ERF_SBMPhysicalBoundary.cpp
        ${SRC_DIR}/Microphysics/SBM/ERF_SBMParticleMixing.cpp
        ${SRC_DIR}/Microphysics/SuperDropletsMoist/ERF_SuperDropletsMoistAdvance.cpp
+      ${SRC_DIR}/Microphysics/SuperDropletsMoist/ERF_SuperDropletsMoistProbes.cpp
        ${SRC_DIR}/Microphysics/SuperDropletsMoist/ERF_SuperDropletsMoistInit.cpp
        ${SRC_DIR}/Microphysics/SuperDropletsMoist/ERF_SuperDropletsMoistPhaseChange.cpp
        ${SRC_DIR}/Microphysics/SuperDropletsMoist/ERF_SuperDropletsMoistUtils.cpp
@@ -677,11 +625,11 @@ function(build_erf_lib erf_lib_name)
        ${SRC_DIR}/PBL/ERF_ComputeDiffusivityMYNNEDMF.cpp
        ${SRC_DIR}/PBL/ERF_ComputeDiffusivityYSU.cpp
        ${SRC_DIR}/PBL/ERF_ComputeDiffusivityMRF.cpp
-       ${SRC_DIR}/PBL/ERF_ComputeDiffusivityYSUNew.cpp
        ${SRC_DIR}/Radiation/ERF_TopographicShading.cpp
        ${SRC_DIR}/Radiation/TwoStream/ERF_RadiationDiagnostics.cpp
        ${SRC_DIR}/Radiation/TwoStream/ERF_TwoStreamRadiation.cpp
        ${SRC_DIR}/Radiation/TwoStream/ERF_SEBTurbulentFlux.cpp
+       ${SRC_DIR}/Radiation/TwoStream/ERF_SEBSkinInit.cpp
        ${SRC_DIR}/Radiation/TwoStream/ERF_ForceRestoreHydrologyState.cpp
        ${SRC_DIR}/Radiation/TwoStream/ERF_ForceRestorePrecipRate.cpp
        ${SRC_DIR}/Radiation/TwoStream/ERF_ForceRestoreSnowState.cpp
@@ -792,23 +740,9 @@ function(build_erf_lib erf_lib_name)
     endif()
   endif()
 
-  if(ERF_ENABLE_EKAT)
-    target_link_libraries(${erf_lib_name} PUBLIC ekat::AllLibs spdlog::spdlog Kokkos::kokkos)
+  if(ERF_ENABLE_KOKKOS)
+    target_link_libraries(${erf_lib_name} PUBLIC Kokkos::kokkos)
   endif()
-#  if(ERF_ENABLE_EKAT)
-#    # Link privately to avoid duplicate link flags, but propagate includes
-#    target_link_libraries(${erf_lib_name} PRIVATE ekat::AllLibs spdlog::spdlog Kokkos::kokkos)
-
-#    # Manually propagate include directories (but not link options)
-#    foreach(lib IN ITEMS ekat::AllLibs spdlog::spdlog Kokkos::kokkos)
-#        if(TARGET ${lib})
-#            get_target_property(inc_dirs ${lib} INTERFACE_INCLUDE_DIRECTORIES)
-#            if(inc_dirs)
-#                target_include_directories(${erf_lib_name} PUBLIC ${inc_dirs})
-#            endif()
-#        endif()
-#    endforeach()
-#  endif()
 
   if(ERF_ENABLE_MPI)
     target_link_libraries(${erf_lib_name} PUBLIC $<$<BOOL:${MPI_CXX_FOUND}>:MPI::MPI_CXX>)
@@ -917,23 +851,19 @@ function(build_erf_exe erf_exe_name)
   include(${ERF_SOURCE_DIR}/CMake/SetERFCompileFlags.cmake)
   set_erf_compile_flags(${erf_exe_name})
 
-  if(ERF_ENABLE_EKAT)
+  if(ERF_ENABLE_KOKKOS)
     # Link privately to avoid duplicate link flags, but propagate includes
-    target_link_libraries(${erf_exe_name} PRIVATE ekat::AllLibs spdlog::spdlog Kokkos::kokkos)
+    target_link_libraries(${erf_exe_name} PRIVATE Kokkos::kokkos)
 
     # Manually propagate include directories (but not link options)
-    foreach(lib IN ITEMS ekat::AllLibs spdlog::spdlog Kokkos::kokkos)
-        if(TARGET ${lib})
-            get_target_property(inc_dirs ${lib} INTERFACE_INCLUDE_DIRECTORIES)
-            if(inc_dirs)
-                target_include_directories(${erf_exe_name} PUBLIC ${inc_dirs})
-            endif()
-        endif()
-    endforeach()
+    get_target_property(inc_dirs Kokkos::kokkos INTERFACE_INCLUDE_DIRECTORIES)
+    if(inc_dirs)
+        target_include_directories(${erf_exe_name} PUBLIC ${inc_dirs})
+    endif()
   endif()
 
   # Remove duplicate HIP link flags from executable
-  if(ERF_ENABLE_HIP AND ERF_ENABLE_EKAT)
+  if(ERF_ENABLE_HIP AND ERF_ENABLE_KOKKOS)
       get_target_property(exe_link_opts ${erf_exe_name} LINK_OPTIONS)
       if(exe_link_opts)
           # Deduplicate by converting to list and back

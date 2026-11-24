@@ -73,9 +73,9 @@ relevant section.
       ERF borrows several physics packages.  See :ref:`sec:build:library`.
 
    EAMxx
-      E3SM Atmosphere Model in C++ -- the C++ rewrite of the E3SM atmosphere model
-      that supplies the SHOC implementation used by ERF.  See
-      :ref:`sec:build:library`.
+      E3SM Atmosphere Model in C++ -- the C++ rewrite of the E3SM atmosphere model.
+      ERF's native SHOC follows the EAMxx SHOC algorithms, and ERF's RRTMGP
+      interface is modeled on the EAMxx one.  See :ref:`SHOC`.
 
    EB
       Embedded Boundary -- the cut-cell representation of solid geometry such as
@@ -86,9 +86,9 @@ relevant section.
       diffusion with a nonlocal mass-flux plume contribution.  See :ref:`MYNNEDMF`.
 
    EKAT
-      E3SM Kokkos Application Toolkit -- the utility library, bundled as a
-      submodule, required by the EAMxx-derived physics.  See
-      :ref:`sec:build:library`.
+      E3SM Kokkos Application Toolkit -- the utility library through which ERF
+      releases up to 26.11 obtained Kokkos for RRTMGP radiation.  ERF now uses
+      the Kokkos submodule directly.  See :ref:`sec:build:library`.
 
    EOS
       Equation of State -- the thermodynamic relation between pressure, density and
@@ -282,7 +282,8 @@ relevant section.
 
    SHOC
       Simplified Higher-Order Closure -- a unified turbulence and cloud macrophysics
-      parameterization taken from EAMxx.  See :ref:`SHOC`.
+      parameterization.  ERF's native implementation is based on the E3SM/EAMxx
+      SHOC algorithms.  See :ref:`SHOC`.
 
    SLM
       Simplified Land Model -- ERF's lightweight land surface model.  See :ref:`SLM`.

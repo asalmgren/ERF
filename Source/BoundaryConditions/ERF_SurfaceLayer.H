@@ -12,6 +12,7 @@
 #include "AMReX_MultiFab.H"
 #include "AMReX_iMultiFab.H"
 #include "AMReX_MFInterpolater.H"
+#include "AMReX_GpuMemory.H"
 
 #include "ERF_IndexDefines.H"
 #include "ERF_Constants.H"
@@ -24,6 +25,7 @@
 #include "ERF_TerrainMetrics.H"
 #include "ERF_PBLHeight.H"
 #include "ERF_SurfaceModel.H"
+#include "ERF_SurfaceTemperature.H"
 #include "ERF_MicrophysicsUtils.H"
 #include "ERF_EB.H"
 
@@ -35,12 +37,13 @@ planar_sources_supported_for_terrain (TerrainType terrain_type,
                                        bool use_tsk,
                                        bool use_coupled_sst,
                                        bool has_lsm_tsurf,
-                                       bool has_lsm_fluxes,
-                                       bool has_custom_roughness)
+                                       bool has_lsm_fluxes)
 {
-    return terrain_type != TerrainType::EB ||
-           !(use_sst || use_tsk || use_coupled_sst || has_lsm_tsurf ||
-             has_lsm_fluxes || has_custom_roughness);
+    if (terrain_type != TerrainType::EB) { return true; }
+
+    // EB supports this configuration only when all planar providers are absent.
+    return !use_sst && !use_tsk && !use_coupled_sst &&
+           !has_lsm_tsurf && !has_lsm_fluxes;
 }
 
 } // namespace erf_surface_layer
@@ -53,7 +56,7 @@ planar_sources_supported_for_terrain (TerrainType terrain_type,
  * 20(3), 479–amrex::Real(489.) https://doi.org/amrex::Real(10.1002)/we.2017
  *
  * Consistent with Dyer (1974) formulation from page 57, Chapter 2, Modeling
- * the vertical ABL structure in Modelling of Atmospheric Flow Fields,
+ * the vertical ABL structure in Modeling of Atmospheric Flow Fields,
  * Demetri P Lalas and Corrado F Ratto, January 1996,
  * https://doi.org/amrex::Real(10.1142)/amrex::Real(2975.)
  */
@@ -178,7 +181,13 @@ public:
       } else if (pblh_string == "mrf") {
           pblh_type = PBLHeightCalcType::MRF;
       } else if (pblh_string == "ysunew") {
-          pblh_type = PBLHeightCalcType::YSUNew;
+          // The former YSUNew is now the only YSU; the name is still accepted
+          static bool warned_ysunew = false;
+          if (!warned_ysunew && amrex::ParallelDescriptor::IOProcessor()) {
+              amrex::Warning(m_pp_prefix + ".most.pblh_calc = YSUNew is deprecated; it is now YSU");
+          }
+          warned_ysunew = true;
+          pblh_type = PBLHeightCalcType::YSU;
       } else {
           amrex::Abort("Undefined PBLH calc type!");
       }
@@ -195,7 +204,8 @@ public:
       // convective velocity scale of ~1e50, which destroys the surface fluxes.
       if (m_include_wstar && (pblh_type == PBLHeightCalcType::None)) {
           amrex::Abort("erf.most.include_wstar requires a PBL height: set "
-                       "erf.most.pblh_calc (MYNN25 is the only scheme implemented)");
+                       "erf.most.pblh_calc to MYNN25 (or MYNNEDMF), or to YSU or MRF "
+                       "with the same erf.pbl_type");
       }
 
       if (m_surf_model) {
@@ -833,12 +843,13 @@ public:
       // LSM flux arrays are planar and compute_sfc_params_from_lsm_fluxes only
       // writes the k=0 slab, while EB MOST consumes surface parameters at
       // arbitrary cut-cell k; no valid planar-to-cut-cell mapping exists yet.
+      // Custom roughness is a horizontal material property, handled separately.
       if (!erf_surface_layer::planar_sources_supported_for_terrain(
               m_terrain_type, use_sst, use_tsk, m_use_coupled_sst,
-              m_has_lsm_tsurf, m_has_lsm_fluxes, read_z0)) {
+              m_has_lsm_tsurf, m_has_lsm_fluxes)) {
           amrex::Abort(
               "EB SurfaceLayer does not support planar SST/TSK, coupled SST, LSM surface "
-              "temperature or fluxes, or custom/file-driven roughness; no mapping exists "
+              "temperature or fluxes; no mapping exists "
               "from those planar inputs to arbitrary EB cut cells.");
       }
 
@@ -916,7 +927,7 @@ public:
           read_custom_roughness(lev, fname);
       }
 
-      // The surface layer normalises with ln(zref / z0), so the reference height
+      // The surface layer normalizes with ln(zref / z0), so the reference height
       // must lie above the roughness length in every column.  With the default
       // (the first cell center) a fine mesh over a rough surface can fail this.
       {
@@ -1016,7 +1027,7 @@ public:
               // NOTE: SST from the LOW file populates TSK in update_sst_tsk.
               //       So if we have TSK, it contains everything and has been
               //       sanity checked for valid SST values.
-              if (use_tsk) { m_ignore_sst = true; }
+              m_ignore_sst = erf_surface_temperature::sst_ignored(m_ignore_sst, use_tsk);
               if (use_tsk) {
                   amrex::Print() << "(land: TSK, ";
               } else {
@@ -1271,11 +1282,22 @@ public:
   /**
    * Fill surface temperature from available SST and TSK data.
    *
-   * @param[in] lev  level index
-   * @param[in] time interpolation time
+   * The SST and TSK slices hold absolute temperature [K].  They are interpolated in
+   * time and converted to potential temperature with the surface pressure diagnosed
+   * from the lowest cell of the current state, so the effective surface temperature
+   * does not drift as the surface pressure evolves.  Land cells without TSK take the
+   * prescribed land surface potential temperature unchanged.
+   *
+   * @param[in] lev       level index
+   * @param[in] time      interpolation time
+   * @param[in] cons_in   conserved state (surface pressure from the lowest cell)
+   * @param[in] z_phys_nd nodal heights, or nullptr on a flat mesh
    */
   void fill_tsurf_with_sst_and_tsk (const int& lev,
-                                    const double& time);
+                                    const double& time,
+                                    const amrex::MultiFab& cons_in,
+                                    const std::unique_ptr<amrex::MultiFab>& z_phys_nd,
+                                    erf_surface_temperature::ConversionFailure* fail);
 
   /**
    * Fill surface temperature interpolated from time varying SST file
@@ -1286,7 +1308,8 @@ public:
   void fill_tsurf_with_sfc_sst (const int& lev,
                                 const double& time,
                                 const amrex::MultiFab& cons_in,
-                                const std::unique_ptr<amrex::MultiFab>& z_phys_nd);
+                                const std::unique_ptr<amrex::MultiFab>& z_phys_nd,
+                                erf_surface_temperature::ConversionFailure* fail);
 
   /**
    * Overwrite surface temperature with coupled ocean SST where the coupler
@@ -1300,7 +1323,8 @@ public:
    */
   void fill_tsurf_with_coupled_sst (const int& lev,
                                     const amrex::MultiFab& cons_in,
-                                    const std::unique_ptr<amrex::MultiFab>& z_phys_nd);
+                                    const std::unique_ptr<amrex::MultiFab>& z_phys_nd,
+                                    erf_surface_temperature::ConversionFailure* fail);
 
   /**
    * Set t_surf from the prescribed absolute surface temperature (most.abs_surf_temp, plus
@@ -1317,7 +1341,8 @@ public:
   void fill_tsurf_with_abs_surf_temp (const int& lev,
                                       const double& time,
                                       const amrex::MultiFab& cons_in,
-                                      const std::unique_ptr<amrex::MultiFab>& z_phys_nd);
+                                      const std::unique_ptr<amrex::MultiFab>& z_phys_nd,
+                                      erf_surface_temperature::ConversionFailure* fail);
 
   /**
    * Overwrite the land surface temperature with an external skin temperature.
@@ -1333,7 +1358,8 @@ public:
    */
   void fill_tsurf_with_skin_temperature (const int& lev,
                                          const amrex::MultiFab& cons_in,
-                                         const std::unique_ptr<amrex::MultiFab>& z_phys_nd);
+                                         const std::unique_ptr<amrex::MultiFab>& z_phys_nd,
+                                         erf_surface_temperature::ConversionFailure* fail);
 
   /**
    * Overwrite the land surface mixing ratio from the external skin temperature and the
@@ -1343,7 +1369,7 @@ public:
    * moisture flux is beta times the potential one. With resistances:
    * erf_surface_moisture::two_source_surface_mixing_ratio of the aerodynamic resistance
    * (from the last u* and Obukhov length; neutral before the first flux), the canopy
-   * resistance with its vapour-deficit factor, the soil resistance and the soil pore air's
+   * resistance with its vapor-deficit factor, the soil resistance and the soil pore air's
    * relative humidity. Needs set_skin_temperature and the averages of this step.
    *
    * @param[in] lev       level index
@@ -1353,6 +1379,11 @@ public:
   void fill_qsurf_with_skin_moisture (const int& lev,
                                       const amrex::MultiFab& cons_in,
                                       const std::unique_ptr<amrex::MultiFab>& z_phys_nd);
+
+  void fill_qsurf_with_skin_moisture (const int& lev,
+                                      const amrex::MultiFab& cons_in,
+                                      const std::unique_ptr<amrex::MultiFab>& z_phys_nd,
+                                      erf_surface_temperature::ConversionFailure* fail);
 
   /**
    * Fill surface moisture from saturation specific humidity.
@@ -1364,6 +1395,11 @@ public:
   void fill_qsurf_with_qsat (const int& lev,
                              const amrex::MultiFab& cons_in,
                              const std::unique_ptr<amrex::MultiFab>& z_phys_nd);
+
+  void fill_qsurf_with_qsat (const int& lev,
+                             const amrex::MultiFab& cons_in,
+                             const std::unique_ptr<amrex::MultiFab>& z_phys_nd,
+                             erf_surface_temperature::ConversionFailure* fail);
 
   void set_pblh (const int& lev, const amrex::MultiFab& pblh_in);
 
@@ -1394,7 +1430,8 @@ public:
    */
   void get_lsm_tsurf (const int& lev,
                       const amrex::MultiFab& cons_in,
-                      const std::unique_ptr<amrex::MultiFab>& z_phys_nd);
+                      const std::unique_ptr<amrex::MultiFab>& z_phys_nd,
+                      erf_surface_temperature::ConversionFailure* fail);
 
   /**
    * Wrapper around compute_pblh.
@@ -1755,7 +1792,7 @@ public:
    *                            canopy's (two_source_surface_mixing_ratio), not from the
    *                            soil-water factor alone:
    *                            the two-stream balance passes true whenever it has a soil type
-   * @param[in] hs              the canopy's vapour-deficit parameter [1/(kg/kg)]; 0 without
+   * @param[in] hs              the canopy's vapor-deficit parameter [1/(kg/kg)]; 0 without
    *                            vegetation
    */
   void set_skin_moisture (const int& lev, const amrex::MultiFab* moisture,
@@ -1878,9 +1915,17 @@ public:
   amrex::MultiFab* get_z0 (const int& lev) { return &z_0[lev]; }
 
   /**
+   * Return the roughness-height field, read-only (for a caller that holds a
+   * const SurfaceLayer, such as a fire engine).
+   *
+   * @param[in] lev level index
+   */
+  const amrex::MultiFab* get_z0 (const int& lev) const { return &z_0[lev]; }
+
+  /**
    * Return whether variable sea roughness is active.
    */
-  bool have_variable_sea_roughness () { return m_var_z0; }
+  bool have_variable_sea_roughness () const { return m_var_z0; }
 
   /**
    * Return the land-mask field.
@@ -1993,7 +2038,7 @@ public:
 
   /**
    * Set the surface current on this level from an ocean coupler's current at the cell
-   * centres of the surface.
+   * centers of the surface.
    *
    * The current is rotated from east and north to the grid axes and averaged to the faces.
    * A face takes it where the cells on both sides of it are water (land mask 0) and covered
@@ -2005,11 +2050,11 @@ public:
    * be replaced by a later call.
    *
    * @param[in] lev       level index
-   * @param[in] east      eastward current [m/s], cell-centred on the 2D surface layout
+   * @param[in] east      eastward current [m/s], cell-centered on the 2D surface layout
    * @param[in] north     northward current [m/s], on the layout of east
    * @param[in] covered   nonzero where the ocean covers the cell, on the layout of east;
    *                      null when it covers none, as for the coupled SST
-   * @param[in] cos_alpha cosine of the angle of the grid x axis from east, cell-centred on
+   * @param[in] cos_alpha cosine of the angle of the grid x axis from east, cell-centered on
    *                      the 2D surface layout; null when the grid is aligned with east
    * @param[in] sin_alpha sine of that angle, on the layout of cos_alpha
    */
@@ -2083,7 +2128,7 @@ public:
     WAVE_COUPLED
   };
 
-  enum struct PBLHeightCalcType { None, MYNN25, YSU, MRF, YSUNew };
+  enum struct PBLHeightCalcType { None, MYNN25, YSU, MRF };
 
   FluxCalcType flux_type{FluxCalcType::MOENG};
   ThetaCalcType theta_type{ThetaCalcType::ADIABATIC};
@@ -2098,6 +2143,10 @@ private:
   amrex::Orientation m_face;
   std::string m_pp_prefix;
   amrex::Vector<amrex::Geometry> m_geom;
+  // Reused for the two collective validation points in update_fluxes; all GPU writes
+  // complete before it is read back and before their outputs reach a flux kernel.
+  amrex::Gpu::DeviceScalar<erf_surface_temperature::ConversionFailure>
+      m_surface_conversion_failure{erf_surface_temperature::ConversionFailure{}};
   bool m_rotate = false;
   amrex::GpuArray<int, AMREX_SPACEDIM*2> m_surface_layer_faces{};
   double m_start_low_time;
@@ -2218,6 +2267,7 @@ private:
   // back into flux calculations, boundary conditions, or model state.
   amrex::Vector<std::unique_ptr<amrex::MultiFab>> surface_diagnostic_source;
 
+  // Lower-boundary SST and TSK time slices, absolute temperature [K]
   amrex::Vector<amrex::Vector<amrex::MultiFab*>>  m_sst_lev;
   amrex::Vector<amrex::Vector<amrex::MultiFab*>>  m_tsk_lev;
   amrex::Vector<amrex::Vector<amrex::iMultiFab*>> m_lmask_lev;
@@ -2252,7 +2302,7 @@ private:
   amrex::Vector<const amrex::MultiFab*>  m_coupled_current_sin_lev;
   // The coupler's grid orientation on the layout fill_surface_current reads, ghost cells
   // filled, per level; remade only when the orientation or that layout changes, since the
-  // coupler calls with the same orientation every step
+  // coupler passes the same orientation on every call
   amrex::Vector<std::unique_ptr<amrex::MultiFab>> m_coupled_rotation_lev;
   amrex::Vector<const amrex::MultiFab*>  m_coupled_rotation_src_lev;
   amrex::Vector<amrex::BoxArray>            m_coupled_rotation_src_ba_lev;

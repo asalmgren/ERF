@@ -159,21 +159,11 @@ option(ERF_ENABLE_ML_UPHYS_DIAGNOSTICS "Enable ML UPHYS diagnostics in SDM" OFF)
 if(ERF_ENABLE_ML_UPHYS_DIAGNOSTICS AND NOT ERF_ENABLE_PARTICLES)
   message(FATAL_ERROR "ERF_ENABLE_ML_UPHYS_DIAGNOSTICS requires particles be enabled")
 endif()
-option(ERF_ENABLE_EAMXX_SHOC "Build EAMxx SHOC parameterization" OFF)
-option(ERF_ENABLE_SHOC "Deprecated alias for ERF_ENABLE_EAMXX_SHOC" OFF)
-if(ERF_ENABLE_SHOC AND NOT ERF_ENABLE_EAMXX_SHOC)
-  message(WARNING "ERF_ENABLE_SHOC is deprecated; use ERF_ENABLE_EAMXX_SHOC=ON")
-  set(ERF_ENABLE_EAMXX_SHOC ON CACHE BOOL "Build EAMxx SHOC parameterization" FORCE)
-  set(ERF_ENABLE_EAMXX_SHOC ON)   # also over a normal variable a parent project set (CMP0126 NEW)
-endif()
-
-# The checked-in Source/PhysicsInterfaces/eamxx_config.h defines SCREAM_DOUBLE_PRECISION, so
-# scream::Real is double and the EAMxx ETI files we compile only instantiate the SHOC templates
-# for double.  ERF instantiates them with amrex::Real, so a SINGLE precision build would ask for
-# Functions<float,...> and fail to link.  Refuse the combination here rather than at link time.
-if(ERF_ENABLE_EAMXX_SHOC AND NOT ERF_PRECISION STREQUAL "DOUBLE")
-  message(FATAL_ERROR "ERF_ENABLE_EAMXX_SHOC requires ERF_PRECISION=DOUBLE because the vendored "
-                      "eamxx_config.h builds EAMxx in double precision")
+# The EAMxx SHOC has been removed; native SHOC (erf.pbl_type = NATIVE_SHOC) is always built
+if(ERF_ENABLE_EAMXX_SHOC OR ERF_ENABLE_SHOC)
+  message(FATAL_ERROR "ERF_ENABLE_EAMXX_SHOC and ERF_ENABLE_SHOC are no longer available: the "
+                      "EAMxx SHOC has been removed. Native SHOC needs no build option; select it "
+                      "with erf.pbl_type = NATIVE_SHOC.")
 endif()
 
 #Options for performance
@@ -210,6 +200,8 @@ option(ERF_ENABLE_NOAHMP "Enable Noah-MP" OFF)
 option(ERF_ENABLE_WINDFARM "Enable wind farm parameterizations" OFF)
 option(ERF_ENABLE_FIRE "Enable the fire coupling (the atmosphere side; fire engines plug into it)" OFF)
 set(ERF_FIRE_ENGINE_DIRS "" CACHE STRING "Fire engine directories (each with ERFFireEngine.cmake) to compile in; needs ERF_ENABLE_FIRE")
+option(ERF_ENABLE_FLOOD "Enable the flood coupling (the atmosphere side; flood engines plug into it)" OFF)
+set(ERF_FLOOD_ENGINE_DIRS "" CACHE STRING "Flood engine directories (each with ERFFloodEngine.cmake) to compile in; needs ERF_ENABLE_FLOOD")
 option(ERF_ENABLE_MOVING_BODIES "Enable the actuator core and the structure coupling for bodies in the flow (Source/MovingBodies)" OFF)
 set(ERF_STRUCTURE_MODEL_DIRS "" CACHE STRING "Structure model directories (each with ERFStructureModel.cmake) to compile in; needs ERF_ENABLE_MOVING_BODIES")
 option(ERF_ENABLE_DUST "Enable the dust coupling (the atmosphere side; dust models plug into it)" OFF)
@@ -423,59 +415,96 @@ endif()
 
 list(POP_BACK CMAKE_MESSAGE_CONTEXT)
 
-########################## EKAT ##################################
+########################## Kokkos ################################
 
-if(ERF_ENABLE_RRTMGP OR ERF_ENABLE_EAMXX_SHOC)
-  set(ERF_ENABLE_EKAT ON)
+# RRTMGP is written in Kokkos. Kokkos comes from the Submodules/kokkos
+# submodule unless -DKokkos_ROOT or -DKokkos_DIR points at an installed Kokkos.
+if(ERF_ENABLE_RRTMGP)
+  set(ERF_ENABLE_KOKKOS ON)
 else()
-  set(ERF_ENABLE_EKAT OFF)
+  set(ERF_ENABLE_KOKKOS OFF)
 endif()
 
-if(ERF_ENABLE_EKAT)
-  list(APPEND CMAKE_MESSAGE_CONTEXT "EKAT")
+if(ERF_ENABLE_KOKKOS)
+  list(APPEND CMAKE_MESSAGE_CONTEXT "Kokkos")
 
-  message(STATUS "Configuring EKAT")
-
-  if(NOT ERF_ENABLE_MPI)
-    message(FATAL_ERROR "CMake Error: MPI must be enabled if EKAT is enabled.")
-  endif()
-
-  # NOTE: EKAT provides KOKKOS, so set relevant flags for KOKKOS
-  if(ERF_ENABLE_CUDA)
-    message(VERBOSE "Enabling Kokkos CUDA support")
-    set(Kokkos_ENABLE_CUDA ON CACHE BOOL "kokkos enable cuda")
-    set(Kokkos_ENABLE_CUDA_LAMBDA ON CACHE BOOL "kokkos enable cuda lambda")
-    set(Kokkos_ENABLE_CUDA_RELOCATABLE_DEVICE_CODE ON CACHE BOOL "kokkos enable cuda RDC")
-  endif()
-
-  if(ERF_ENABLE_HIP)
-    message(VERBOSE "Enabling Kokkos HIP support")
-    set(Kokkos_ENABLE_HIP ON CACHE BOOL "kokkos enable hip")
-    set(Kokkos_ENABLE_HIP_LAMBDA ON CACHE BOOL "kokkos enable hip lambda")
-    set(Kokkos_ENABLE_HIP_RELOCATABLE_DEVICE_CODE ON CACHE BOOL "kokkos enable hip RDC")
-  endif()
-
-  if(ERF_ENABLE_SYCL)
-    message(VERBOSE "Enabling Kokkos SYCL support")
-    set(Kokkos_ENABLE_SYCL ON CACHE BOOL "kokkos enable sycl")
-    set(Kokkos_ENABLE_SYCL_LAMBDA ON CACHE BOOL "kokkos enable sycl lambda")
-  endif()
+  message(STATUS "Configuring Kokkos")
 
   set(CMAKE_CXX_STANDARD 20)
-  set(EKAT_ENABLE_MPI ON CACHE BOOL "ekat enable mpi")
-  set(EKAT_ENABLE_TESTS OFF CACHE BOOL "ekat enable tests")
-  set(EKAT_ENABLE_KOKKOS ON CACHE BOOL "ekat enable kokkos")
-  set(EKAT_ENABLE_LOGGING ON CACHE BOOL "ekat enable spdlog")
-  # Kokkos deprecation used inside EKAT or RRTMGP is theirs to fix
-  set(Kokkos_ENABLE_DEPRECATION_WARNINGS OFF CACHE BOOL "kokkos deprecation warnings")
-  set(EKAT_BIN ${PROJECT_BINARY_DIR}/Submodules/ekat)
 
-  # Force use of internal spdlog from EKAT
-  message(STATUS "Forcing Ekat to build their own spdlog")
-  set(CMAKE_DISABLE_FIND_PACKAGE_spdlog TRUE)
+  # Only an explicit -DKokkos_ROOT or -DKokkos_DIR selects an installed Kokkos;
+  # a Kokkos_ROOT in the environment, which modules often set, is not enough
+  if(Kokkos_ROOT OR Kokkos_DIR)
+    find_package(Kokkos 5.1 REQUIRED)
+    message(STATUS "Using installed Kokkos ${Kokkos_VERSION} from ${Kokkos_DIR}")
 
-  message(VERBOSE "EKAT binary directory: ${EKAT_BIN}")
-  add_subdirectory(${PROJECT_SOURCE_DIR}/Submodules/ekat ${EKAT_BIN})
+    # An installed Kokkos is only usable if it was built for the same GPU
+    # backend as this ERF build
+    set(erf_kokkos_mismatch "")
+    foreach(backend IN ITEMS CUDA HIP SYCL)
+      set(erf_want ${ERF_ENABLE_${backend}})
+      list(FIND Kokkos_DEVICES ${backend} erf_have_index)
+      if(erf_want AND erf_have_index EQUAL -1)
+        string(APPEND erf_kokkos_mismatch " ${backend} is enabled in ERF but not in Kokkos;")
+      elseif(NOT erf_want AND NOT erf_have_index EQUAL -1)
+        string(APPEND erf_kokkos_mismatch " ${backend} is enabled in Kokkos but not in ERF;")
+      endif()
+    endforeach()
+    if(erf_kokkos_mismatch)
+      message(FATAL_ERROR "The Kokkos install in ${Kokkos_DIR} does not match this configuration:"
+                          "${erf_kokkos_mismatch} reconfigure without Kokkos_ROOT/Kokkos_DIR "
+                          "to build the Kokkos submodule instead")
+    endif()
+  else()
+    if(NOT EXISTS ${PROJECT_SOURCE_DIR}/Submodules/kokkos/CMakeLists.txt)
+      message(FATAL_ERROR "Kokkos submodule not found: run "
+                          "'git submodule update --init Submodules/kokkos', "
+                          "or set Kokkos_ROOT to an installed Kokkos")
+    endif()
+
+    if(ERF_ENABLE_CUDA)
+      message(VERBOSE "Enabling Kokkos CUDA support")
+      set(Kokkos_ENABLE_CUDA ON CACHE BOOL "kokkos enable cuda")
+      set(Kokkos_ENABLE_CUDA_LAMBDA ON CACHE BOOL "kokkos enable cuda lambda")
+      set(Kokkos_ENABLE_CUDA_RELOCATABLE_DEVICE_CODE ON CACHE BOOL "kokkos enable cuda RDC")
+    endif()
+
+    if(ERF_ENABLE_HIP)
+      message(VERBOSE "Enabling Kokkos HIP support")
+      set(Kokkos_ENABLE_HIP ON CACHE BOOL "kokkos enable hip")
+      set(Kokkos_ENABLE_HIP_LAMBDA ON CACHE BOOL "kokkos enable hip lambda")
+      set(Kokkos_ENABLE_HIP_RELOCATABLE_DEVICE_CODE ON CACHE BOOL "kokkos enable hip RDC")
+    endif()
+
+    if(ERF_ENABLE_SYCL)
+      message(VERBOSE "Enabling Kokkos SYCL support")
+      set(Kokkos_ENABLE_SYCL ON CACHE BOOL "kokkos enable sycl")
+      set(Kokkos_ENABLE_SYCL_LAMBDA ON CACHE BOOL "kokkos enable sycl lambda")
+    endif()
+
+    set(Kokkos_ENABLE_SERIAL ON CACHE BOOL "kokkos enable serial")
+    # RRTMGP is written for the legacy View; Kokkos 5 defaults to the mdspan View
+    set(Kokkos_ENABLE_IMPL_VIEW_LEGACY ON CACHE BOOL "kokkos legacy view implementation")
+    # Kokkos deprecation used inside RRTMGP is theirs to fix
+    set(Kokkos_ENABLE_DEPRECATION_WARNINGS OFF CACHE BOOL "kokkos deprecation warnings")
+
+    set(KOKKOS_BIN ${PROJECT_BINARY_DIR}/Submodules/kokkos)
+    message(VERBOSE "Kokkos binary directory: ${KOKKOS_BIN}")
+    add_subdirectory(${PROJECT_SOURCE_DIR}/Submodules/kokkos ${KOKKOS_BIN})
+
+    # Host-device lambdas in the CXX sources that include Kokkos, and no fused
+    # multiply-add in debug builds so device results stay bit-for-bit with host
+    if(Kokkos_ENABLE_CUDA)
+      target_compile_options(kokkoscore PUBLIC
+        "$<$<COMPILE_LANGUAGE:CXX>:--expt-extended-lambda>"
+        "$<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Debug>>:--fmad=false>")
+    endif()
+
+    if(Kokkos_ENABLE_OPENMP)
+      find_package(OpenMP REQUIRED COMPONENTS CXX)
+      target_link_libraries(kokkoscore PUBLIC OpenMP::OpenMP_CXX)
+    endif()
+  endif()
 
   # Print Kokkos properties
   if(TARGET Kokkos::kokkos)
@@ -484,45 +513,27 @@ if(ERF_ENABLE_EKAT)
     print_target_properties(kokkoscore)
   endif()
 
-# Strip GPU flags from Kokkos (AMReX provides them)
-if(ERF_ENABLE_HIP AND ERF_ENABLE_EKAT)
-  # Clear ALL link options from Kokkos targets - AMReX provides everything we need
-  foreach(kokkos_target IN ITEMS kokkoscore kokkoscontainers kokkosalgorithms Kokkos::kokkos)
-    if(TARGET ${kokkos_target})
-      get_target_property(kokkos_link_opts ${kokkos_target} INTERFACE_LINK_OPTIONS)
-      if(kokkos_link_opts AND NOT kokkos_link_opts STREQUAL "kokkos_link_opts-NOTFOUND")
-        # Clear ALL link options - AMReX provides GPU flags
-        set_target_properties(${kokkos_target} PROPERTIES INTERFACE_LINK_OPTIONS "")
-        message(STATUS "Cleared link options from ${kokkos_target} (AMReX provides GPU flags)")
+  # Strip GPU flags from Kokkos (AMReX provides them)
+  if(ERF_ENABLE_HIP)
+    # Clear ALL link options from Kokkos targets - AMReX provides everything we need
+    foreach(kokkos_target IN ITEMS kokkoscore kokkoscontainers kokkosalgorithms Kokkos::kokkos)
+      if(TARGET ${kokkos_target})
+        get_target_property(kokkos_link_opts ${kokkos_target} INTERFACE_LINK_OPTIONS)
+        if(kokkos_link_opts AND NOT kokkos_link_opts STREQUAL "kokkos_link_opts-NOTFOUND")
+          # Clear ALL link options - AMReX provides GPU flags
+          set_target_properties(${kokkos_target} PROPERTIES INTERFACE_LINK_OPTIONS "")
+          message(STATUS "Cleared link options from ${kokkos_target} (AMReX provides GPU flags)")
+        endif()
       endif()
+    endforeach()
+
+    # Print kokkoscore after clearing
+    if(TARGET kokkoscore)
+      print_target_properties(kokkoscore)
     endif()
-  endforeach()
+  endif()
 
-  # Print kokkoscore after clearing
-  print_target_properties(kokkoscore)
-endif()
-# Strip GPU flags from Kokkos (AMReX provides them)
-#if(ERF_ENABLE_HIP AND ERF_ENABLE_EKAT)
-#  # Strip from ALL Kokkos targets
-#  foreach(kokkos_target IN ITEMS kokkoscore kokkoscontainers kokkosalgorithms Kokkos::kokkos)
-#    if(TARGET ${kokkos_target})
-#      get_target_property(kokkos_link_opts ${kokkos_target} INTERFACE_LINK_OPTIONS)
-#      if(kokkos_link_opts AND NOT kokkos_link_opts STREQUAL "kokkos_link_opts-NOTFOUND")
-#        # Filter out GPU-related generator expressions
-#        list(FILTER kokkos_link_opts EXCLUDE REGEX ".*--hip-link.*")
-#        list(FILTER kokkos_link_opts EXCLUDE REGEX ".*--offload-arch=.*")
-#        list(FILTER kokkos_link_opts EXCLUDE REGEX ".*-fgpu-rdc.*")
-#        set_target_properties(${kokkos_target} PROPERTIES INTERFACE_LINK_OPTIONS "${kokkos_link_opts}")
-#        message(STATUS "Stripped GPU flags from ${kokkos_target}")
-#      endif()
-#    endif()
-#  endforeach()
-
-#  # Print kokkoscore after stripping
-#  print_target_properties(kokkoscore)
-#endif()
-
-list(POP_BACK CMAKE_MESSAGE_CONTEXT)
+  list(POP_BACK CMAKE_MESSAGE_CONTEXT)
 endif()
 
 ########################### MPI #####################################
@@ -683,8 +694,8 @@ if(ERF_ENABLE_RRTMGP)
 
   message(STATUS "Configuring RRTMGP")
 
-  if(NOT ERF_ENABLE_EKAT)
-      message(FATAL_ERROR "EKAT must be enabled if RRTMGP is enabled")
+  if(NOT ERF_ENABLE_KOKKOS)
+      message(FATAL_ERROR "Kokkos must be enabled if RRTMGP is enabled")
   endif()
 
   if(NOT ERF_ENABLE_NETCDF)
@@ -705,52 +716,13 @@ if(ERF_ENABLE_RRTMGP)
     $<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang,AppleClang>:-Wno-unused-local-typedefs>
     $<$<COMPILE_LANG_AND_ID:CXX,Clang,AppleClang>:-Wno-c++11-narrowing>
   )
-  target_link_libraries(rrtmgp kokkos)
+  target_link_libraries(rrtmgp Kokkos::kokkos)
   message(DEBUG "Added Kokkos to RRTMGP target")
 
   # Print RRTMGP properties
   print_target_properties(rrtmgp)
 
   message(STATUS "RRTMGP configuration complete")
-  list(POP_BACK CMAKE_MESSAGE_CONTEXT)
-endif()
-
-########################### SHOC #################################
-
-if(ERF_ENABLE_EAMXX_SHOC)
-  list(APPEND CMAKE_MESSAGE_CONTEXT "SHOC")
-
-  message(STATUS "Configuring SHOC")
-
-  if(NOT ERF_ENABLE_EKAT)
-      message(FATAL_ERROR "EKAT must be enabled if SHOC is enabled")
-  endif()
-
-  # NOTE: We compile shoc src files directly
-  message(VERBOSE "SHOC source files will be compiled directly")
-
-  # E3SM Cloned Check
-  message(VERBOSE "Checking EAMxx files from E3SM")
-
-  set(E3SM_EXPECTED_PATH "${PROJECT_SOURCE_DIR}/external/E3SM")
-
-  if(NOT EXISTS "${PROJECT_SOURCE_DIR}/external/E3SM/components/eamxx/src/physics")
-      message(FATAL_ERROR
-          "E3SM provides eamxx required for SHOC but not found.\n"
-          "\n"
-          "This requires specific EAMxx physics source files from E3SM at commit 2eb52d9.\n"
-          "\n"
-          "Option 1 - Use provided script (recommended):\n"
-          "  ${PROJECT_SOURCE_DIR}/Build/eamxx_clone.sh\n"
-          "\n"
-          "Option 2 - Symlink existing E3SM (not tested, must be at commit 2eb52d9b3d):\n"
-          "  ln -s /path/to/your/E3SM ${PROJECT_SOURCE_DIR}/external/E3SM\n"
-          "\n"
-          "Or disable features:\n"
-          "  cmake -DERF_ENABLE_EAMXX_SHOC=OFF ..\n")
-  endif()
-
-  message(STATUS "SHOC configuration complete")
   list(POP_BACK CMAKE_MESSAGE_CONTEXT)
 endif()
 

@@ -16,7 +16,132 @@
 #endif
 #include <AMReX_buildInfo.H>
 
+#include <bit>
+#include <cstdint>
+#include <fstream>
+#include <iomanip>
+
 using namespace amrex;
+
+namespace {
+// Write one-component nodal MultiFabs (one per level) as VTK point data:
+// dir/L<lev>_B<box>.vti per box (ImageData, raw binary Float32), indexed by <vtm_name>.vtm,
+// which is written next to dir (in dir's parent directory).
+// dir must not contain "plt" in its name: ParaView hands any such directory to its
+// AMReX plotfile reader, which crashes on it.
+// Assumes uniform spacing in every direction.
+void
+WriteNodalVTK (const std::string& dir, const std::string& vtm_name, const std::string& varname,
+               const Vector<const MultiFab*>& mf, const Vector<Geometry>& geom)
+{
+    // The whole output is rewritten each time, so the old one is removed rather than kept
+    UtilCreateDirectoryDestructive(dir, true);
+    const std::string parent   = dir.substr(0, dir.find_last_of('/') + 1);
+    const std::string dir_base = dir.substr(parent.size());
+
+    // The sizes and values are written in the host's byte order (if constexpr, since a
+    // conditional on this compile-time constant is flagged as unreachable code by clang)
+    const char* byte_order = "LittleEndian";
+    if constexpr (std::endian::native == std::endian::big) { byte_order = "BigEndian"; }
+
+    auto piece_file = [] (int lev, int box) {
+        return "L" + std::to_string(lev) + "_B" + std::to_string(box) + ".vti";
+    };
+    auto extent = [] (const Box& bx) {
+        const IntVect lo = bx.smallEnd(), hi = bx.bigEnd();
+        return std::to_string(lo[0]) + " " + std::to_string(hi[0]) + " " +
+               std::to_string(lo[1]) + " " + std::to_string(hi[1]) + " " +
+               std::to_string(lo[2]) + " " + std::to_string(hi[2]);
+    };
+
+    for (int lev = 0; lev < mf.size(); ++lev) {
+        const Real* plo = geom[lev].ProbLo();
+        const Real* dx  = geom[lev].CellSize();
+
+        // Copy every box of this rank to the host, then wait once
+        Vector<int> box_index;
+        Vector<std::unique_ptr<FArrayBox>> hfabs;
+        for (MFIter mfi(*mf[lev]); mfi.isValid(); ++mfi) {
+            const Box& bx = mfi.validbox();
+            hfabs.push_back(std::make_unique<FArrayBox>(bx, 1, The_Pinned_Arena()));
+            hfabs.back()->copy<RunOn::Device>((*mf[lev])[mfi], bx);
+            box_index.push_back(mfi.index());
+        }
+        Gpu::streamSynchronize();
+
+        for (int n = 0; n < hfabs.size(); ++n) {
+            const FArrayBox& hfab = *hfabs[n];
+            const Box& bx = hfab.box();
+            const auto npts = static_cast<std::size_t>(bx.numPts());
+            std::vector<float> data(npts);
+            const Real* src = hfab.dataPtr();
+            for (std::size_t m = 0; m < npts; ++m) { data[m] = static_cast<float>(src[m]); }
+            const auto nbytes = static_cast<std::uint64_t>(npts * sizeof(float));
+
+            const std::string fname = dir + "/" + piece_file(lev, box_index[n]);
+            std::ofstream ofs(fname, std::ios::binary);
+            if (!ofs.is_open()) { FileOpenFailed(fname); }
+            ofs << std::setprecision(17)
+                << "<?xml version=\"1.0\"?>\n"
+                << "<VTKFile type=\"ImageData\" version=\"1.0\" byte_order=\"" << byte_order
+                << "\" header_type=\"UInt64\">\n"
+                << "<ImageData WholeExtent=\"" << extent(bx) << "\" Origin=\""
+                << plo[0] << " " << plo[1] << " " << plo[2] << "\" Spacing=\""
+                << dx[0] << " " << dx[1] << " " << dx[2] << "\">\n"
+                << "<Piece Extent=\"" << extent(bx) << "\">\n"
+                << "<PointData Scalars=\"" << varname << "\">\n"
+                << "<DataArray type=\"Float32\" Name=\"" << varname
+                << "\" format=\"appended\" offset=\"0\"/>\n"
+                << "</PointData>\n<CellData/>\n</Piece>\n</ImageData>\n"
+                << "<AppendedData encoding=\"raw\">\n_";
+            ofs.write(reinterpret_cast<const char*>(&nbytes), sizeof(nbytes));
+            ofs.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(nbytes));
+            ofs << "\n</AppendedData>\n</VTKFile>\n";
+            ofs.close();
+            if (ofs.fail()) { Abort("WriteNodalVTK: failed writing " + fname); }
+        }
+    }
+
+    if (ParallelDescriptor::IOProcessor()) {
+        const std::string fname = parent + vtm_name + ".vtm";
+        std::ofstream ofs(fname);
+        if (!ofs.is_open()) { FileOpenFailed(fname); }
+        ofs << "<?xml version=\"1.0\"?>\n"
+            << "<VTKFile type=\"vtkMultiBlockDataSet\" version=\"1.0\" byte_order=\"" << byte_order << "\">\n"
+            << "<vtkMultiBlockDataSet>\n";
+        for (int lev = 0; lev < mf.size(); ++lev) {
+            ofs << "<Block index=\"" << lev << "\" name=\"Level_" << lev << "\">\n";
+            for (int b = 0; b < mf[lev]->boxArray().size(); ++b) {
+                ofs << "<DataSet index=\"" << b << "\" file=\"" << dir_base << "/" << piece_file(lev, b) << "\"/>\n";
+            }
+            ofs << "</Block>\n";
+        }
+        ofs << "</vtkMultiBlockDataSet>\n</VTKFile>\n";
+        ofs.close();
+        if (ofs.fail()) { Abort("WriteNodalVTK: failed writing " + fname); }
+    }
+}
+} // namespace
+
+// Write the nodal EB level set of every level that exists now, once, as eb_levelset.vtm +
+// eb_levelset/L<lev>_B<box>.vti in the directory of erf.plot_file_1.
+// The EB does not move, so this goes with the EB surface output (erf.write_eb_surface).
+void
+ERF::WriteEBLevelSet ()
+{
+    if (SolverChoice::mesh_type != MeshType::ConstantDz) {
+        Print() << "WARNING: EB level set output assumes uniform dz (mesh_type = ConstantDz); "
+                << "skipping it" << std::endl;
+        return;
+    }
+    Vector<const MultiFab*> ls(finest_level+1);
+    for (int lev = 0; lev <= finest_level; ++lev) {
+        ls[lev] = &EBFactory(lev).getLevelSet();
+    }
+    // The directory of the plotfiles (everything up to the last '/' of erf.plot_file_1)
+    const std::string plot_dir = plot3d_file_1.substr(0, plot3d_file_1.find_last_of('/') + 1);
+    WriteNodalVTK(plot_dir + "eb_levelset", "eb_levelset", "levelset", ls, geom);
+}
 
 
 void
@@ -282,8 +407,21 @@ ERF::appendPlot3DVariables (const Vector<std::string>& plot_var_names,
     }
 #endif
 
+#ifdef ERF_USE_FLOOD
+    // The flood engine's fields, at k = 0 of the flood grid's level; filled
+    // after the fire's in FillPlot3DVars, in this order
+    if (m_flood_coupler) {
+        for (const auto& plot_name : m_flood_coupler->plot_var_names()) {
+            if (containerHasElement(plot_var_names, plot_name) &&
+                !containerHasElement(tmp_plot_names, plot_name)) {
+                tmp_plot_names.push_back(plot_name);
+            }
+        }
+    }
+#endif
+
 #ifdef ERF_USE_MOVING_BODIES
-    // The structure model's fields; filled after the fire's in FillPlot3DVars, in this order
+    // The structure model's fields; filled after the fire's and the flood's in FillPlot3DVars, in this order
     if (m_structure_model) {
         // Every name ERF and the other models provide, requested or not: a model name among
         // them would be dropped here and still filled there
@@ -300,6 +438,11 @@ ERF::appendPlot3DVariables (const Vector<std::string>& plot_var_names,
 #ifdef ERF_USE_FIRE
         if (m_fire_coupler) {
             for (const auto& n : m_fire_coupler->plot_var_names()) { taken.push_back(n); }
+        }
+#endif
+#ifdef ERF_USE_FLOOD
+        if (m_flood_coupler) {
+            for (const auto& n : m_flood_coupler->plot_var_names()) { taken.push_back(n); }
         }
 #endif
         check_structure_plot_names(*m_structure_model, taken);
@@ -443,14 +586,17 @@ ERF::BuildPlot3DScratch (const Vector<std::string>& plot_var_names, Plot3DScratc
                 // todo - clean this up
                 const Box& bxcc= mfi.tilebox();
 
-                const Array4<Real>& tau12 = (Tau[lev][TauType::tau12]) ? Tau[lev][TauType::tau12]->array(mfi) : Array4<Real>{};
-                const Array4<Real>& tau21 = (Tau[lev][TauType::tau21]) ? Tau[lev][TauType::tau21]->array(mfi) : Array4<Real>{};
+                // Without terrain or lateral surface-layer BCs (or vertical implicit diffusion, for
+                // tau31/tau32) the transposed components are not stored: the stress is symmetric
+                // there and the momentum equations use tau12/tau13/tau23 in their place, so do too
+                const Array4<Real>  tau12 = (Tau[lev][TauType::tau12]) ? Tau[lev][TauType::tau12]->array(mfi) : Array4<Real>{};
+                const Array4<Real>  tau21 = (Tau[lev][TauType::tau21]) ? Tau[lev][TauType::tau21]->array(mfi) : tau12;
 
-                const Array4<Real>& tau13 = (Tau[lev][TauType::tau13]) ? Tau[lev][TauType::tau13]->array(mfi) : Array4<Real>{};
-                const Array4<Real>& tau31 = (Tau[lev][TauType::tau31]) ? Tau[lev][TauType::tau31]->array(mfi) : Array4<Real>{};
+                const Array4<Real>  tau13 = (Tau[lev][TauType::tau13]) ? Tau[lev][TauType::tau13]->array(mfi) : Array4<Real>{};
+                const Array4<Real>  tau31 = (Tau[lev][TauType::tau31]) ? Tau[lev][TauType::tau31]->array(mfi) : tau13;
 
-                const Array4<Real>& tau23 = (Tau[lev][TauType::tau23]) ? Tau[lev][TauType::tau23]->array(mfi) : Array4<Real>{};
-                const Array4<Real>& tau32 = (Tau[lev][TauType::tau32]) ? Tau[lev][TauType::tau32]->array(mfi) : Array4<Real>{};
+                const Array4<Real>  tau23 = (Tau[lev][TauType::tau23]) ? Tau[lev][TauType::tau23]->array(mfi) : Array4<Real>{};
+                const Array4<Real>  tau32 = (Tau[lev][TauType::tau32]) ? Tau[lev][TauType::tau32]->array(mfi) : tau23;
 
                 const Array4<Real>& tau_cc   = mf_cc_tau[lev].array(mfi);
                 ParallelFor(bxcc, [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept {
@@ -690,10 +836,11 @@ ERF::FillPlot3DVars (int lev,
            } // mfi
            pressure.FillBoundary(geom[lev].periodicity());
         } // compute compressible pressure
-    } // not anelastic
+    } // FullyCompressible
     else {
         if (needs_pressure) {
-            // Copy p_hse into pressure if using anelastic
+            // Copy p_hse into pressure if anelastic or pseudo-incompressible, whose pressure
+            // comes from the projection rather than the EOS
             pressure.define(ba,dm,1,0);
             MultiFab::Copy(pressure,p_hse,0,0,1,0);
         }
@@ -729,6 +876,32 @@ ERF::FillPlot3DVars (int lev,
             mf_comp++;
         }
     }; // end calculate_derived
+
+    // The same for the quantities made from the vorticity, which take the map factors as well
+    auto calculate_derived_vort = [&](const std::string& der_name,
+                                      MultiFab& src_mf,
+                                      decltype(derived::erf_dervortz)& der_function)
+    {
+        if (containerHasElement(plot_var_names, der_name)) {
+            MultiFab dmf(mf_dst, make_alias, mf_comp, 1);
+            // As above, no tiling in z ("helicity" is a whole-column operation)
+#ifdef _OPENMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+            for (MFIter mfi(dmf, TileNoZ()); mfi.isValid(); ++mfi)
+            {
+                const Box& bx = mfi.tilebox();
+                auto& dfab = dmf[mfi];
+                auto& sfab = src_mf[mfi];
+                auto& zfab = (*z_phys_cc[lev])[mfi];
+                der_function(bx, dfab, 0, 1, sfab, zfab, Geom(lev), tnew, nullptr, lev,
+                             &(*mapfac[lev][MapFacType::m_x])[mfi],
+                             &(*mapfac[lev][MapFacType::m_y])[mfi]);
+            }
+
+            mf_comp++;
+        }
+    }; // end calculate_derived_vort
     // ***************************************************************************************
 
     // *****************************************************************************************
@@ -817,12 +990,12 @@ ERF::FillPlot3DVars (int lev,
     }
     calculate_derived("mucape"         ,  vars_new[lev][Vars::cons], derived::erf_dermucape);
 
-    calculate_derived("vorticity_x",    mf_cc_vel[lev], derived::erf_dervortx);
-    calculate_derived("vorticity_y",    mf_cc_vel[lev], derived::erf_dervorty);
-    calculate_derived("vorticity_z",    mf_cc_vel[lev], derived::erf_dervortz);
-    calculate_derived("helicity",       mf_cc_vel[lev], derived::erf_derhelicity);
-    calculate_derived("local_helicity", mf_cc_vel[lev], derived::erf_derlocalhelicity);
-    calculate_derived("vort_stretching", mf_cc_vel[lev], derived::erf_dervortstretching);
+    calculate_derived_vort("vorticity_x",    mf_cc_vel[lev], derived::erf_dervortx);
+    calculate_derived_vort("vorticity_y",    mf_cc_vel[lev], derived::erf_dervorty);
+    calculate_derived_vort("vorticity_z",    mf_cc_vel[lev], derived::erf_dervortz);
+    calculate_derived_vort("helicity",       mf_cc_vel[lev], derived::erf_derhelicity);
+    calculate_derived_vort("local_helicity", mf_cc_vel[lev], derived::erf_derlocalhelicity);
+    calculate_derived_vort("vort_stretching", mf_cc_vel[lev], derived::erf_dervortstretching);
     calculate_derived("magvel",         mf_cc_vel[lev], derived::erf_dermagvel);
 
     if (containerHasElement(plot_var_names, "divU"))
@@ -832,6 +1005,35 @@ ERF::FillPlot3DVars (int lev,
         u[0] = &(vars_new[lev][Vars::xvel]);
         u[1] = &(vars_new[lev][Vars::yvel]);
         u[2] = &(vars_new[lev][Vars::zvel]);
+        // On a terrain-fitted mesh compute_divergence takes the contravariant vertical
+        // velocity Omega in place of w. As in the dycore (and the Omega tagging), it is zero on
+        // the bottom face and equal to w on the top face, which validate_flat_top makes flat.
+        // NOTE: with MovingFittedMesh the mesh velocity z_t is not subtracted
+        MultiFab omega;
+        if (SolverChoice::mesh_type == MeshType::VariableDz) {
+            const int klo = geom[lev].Domain().smallEnd(2);
+            const int khi = geom[lev].Domain().bigEnd(2);
+            const auto dxInv = geom[lev].InvCellSizeArray();
+            omega.define(vars_new[lev][Vars::zvel].boxArray(), vars_new[lev][Vars::zvel].DistributionMap(), 1, 0);
+            for (MFIter mfi(omega, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+            {
+                const Box& tbz = mfi.tilebox();
+                const Array4<      Real>& om_arr = omega.array(mfi);
+                const Array4<const Real>& u_arr  = vars_new[lev][Vars::xvel].const_array(mfi);
+                const Array4<const Real>& v_arr  = vars_new[lev][Vars::yvel].const_array(mfi);
+                const Array4<const Real>& w_arr  = vars_new[lev][Vars::zvel].const_array(mfi);
+                const Array4<const Real>& z_nd   = z_phys_nd[lev]->const_array(mfi);
+                const Array4<const Real>& mf_u   = mapfac[lev][MapFacType::u_x]->const_array(mfi);
+                const Array4<const Real>& mf_v   = mapfac[lev][MapFacType::v_y]->const_array(mfi);
+                ParallelFor(tbz, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+                {
+                    om_arr(i,j,k) = (k <= klo  ) ? zero :
+                                    (k >= khi+1) ? w_arr(i,j,k) :
+                        OmegaFromW(i,j,k,w_arr(i,j,k),u_arr,v_arr,mf_u,mf_v,z_nd,dxInv);
+                });
+            }
+            u[2] = &omega;
+        }
         compute_divergence(lev, dmf, u, *mapfac[lev][MapFacType::m_x],
                            *mapfac[lev][MapFacType::m_y], *mapfac[lev][MapFacType::v_x],
                            *mapfac[lev][MapFacType::u_y], *ax[lev], *ay[lev],
@@ -1536,7 +1738,7 @@ ERF::FillPlot3DVars (int lev,
     // The boundary layer height in meters AGL.  Native SHOC carries its own
     // column-filled diagnostic; every other scheme gets it from the surface
     // layer, which diagnoses it whenever erf.most.pblh_calc is set (MYNN25
-    // computes it directly, MRF/YSU/YSUNew write theirs back via set_pblh).
+    // computes it directly, MRF/YSU write theirs back via set_pblh).
     // That field is two-dimensional, so broadcast it down each column.
     if (containerHasElement(plot_var_names, "pblh")) {
         const auto& surf_lay_zlo = m_SurfaceLayer[Orientation(Direction::z, Orientation::low)];
@@ -2056,8 +2258,20 @@ ERF::FillPlot3DVars (int lev,
     }
 #endif
 
-#ifdef ERF_USE_MOVING_BODIES
+#ifdef ERF_USE_FLOOD
     // Must match the order of appendPlot3DVariables (after the fire)
+    if (m_flood_coupler) {
+        for (const auto& plot_name : m_flood_coupler->plot_var_names()) {
+            if (containerHasElement(plot_var_names, plot_name)) {
+                m_flood_coupler->fill_plot_var(plot_name, mf_dst, mf_comp, lev);
+                mf_comp += 1;
+            }
+        }
+    }
+#endif
+
+#ifdef ERF_USE_MOVING_BODIES
+    // Must match the order of appendPlot3DVariables (after the fire and the flood)
     if (m_structure_model) {
         for (const auto& plot_name : m_structure_model->plot_var_names()) {
             if (containerHasElement(plot_var_names, plot_name)) {

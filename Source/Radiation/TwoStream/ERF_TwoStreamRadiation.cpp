@@ -1,4 +1,5 @@
 #include <ERF_TwoStreamRadiation.H>
+#include <ERF_RadiationInterface.H>
 #include <ERF_RadStruct.H>
 #include <AMReX_VisMF.H>
 #include <AMReX_PlotFileUtil.H>
@@ -298,25 +299,12 @@ TwoStreamRadiation::define_level (int lev,
     // and they all have the same consequence, that no box holds a column to sweep.
     //
     // Above level 0 that is not an error: ERF::advance_radiation interpolates the level's
-    // heating rates and fluxes from its parent, the route RRTMGP takes for a nested patch,
-    // and level_needs_interpolation() there applies this same per-box test so the two agree.
-    //
-    // On level 0 there is no parent to interpolate from, so it is fatal. Level 0 always
-    // covers the domain, which makes a box that does not span z there exactly the
-    // decomposed-in-z case -- and the remedies below are the ones that apply to it.
-    if (lev == 0) {
-        for (int ibox = 0; ibox < ba.size(); ++ibox) {
-            const Box& b = ba[ibox];
-            if (b.smallEnd(2) != domain.smallEnd(2) || b.bigEnd(2) != domain.bigEnd(2)) {
-                amrex::Abort("erf.radiation_model = TwoStream cannot run on a level 0 whose "
-                             "grids are decomposed in z: a box there holds only part of a "
-                             "column, and level 0 has no parent to interpolate from. Set "
-                             "amr.max_grid_size_z to at least the number of cells in z, or "
-                             "leave amr.no_box_split_dir at its default of 2 so grids are "
-                             "never split in z.");
-            }
-        }
-    }
+    // heating rates and fluxes from its parent, the route RRTMGP takes for a nested patch.
+    // On level 0 there is no parent to interpolate from, so it is fatal; ERF rejects such a
+    // level 0 for every radiation model when its grids are built (ERF::check_rad_level_grids,
+    // called just before this), so here it is only asserted.
+    AMREX_ASSERT(lev > 0 || rad_boxes_span_column(ba, domain));
+    amrex::ignore_unused(ba, domain);
 
     // 2D surface fields on the horizontal BoxArray, one ghost cell in x and y
     const IntVect ng_sfc{1,1,0};
@@ -723,10 +711,14 @@ TwoStreamRadiation::write_checkpoint (int lev, const std::string& checkpointname
         VisMF::Write(*m_q_sfc[lev],
                      MultiFabFileFullPrefix(lev, checkpointname, "Level_", "TwoStream_QSfc"));
     }
-    // The deep state evolves only with erf.radiation.seb_deep_prognostic_enable.
-    if (m_rad->seb_deep_prognostic_enable && m_t_deep[lev] && m_q_deep[lev]) {
+    // The deep state evolves only with erf.radiation.seb_deep_prognostic_enable. The deep
+    // temperature is also written when erf.radiation.seb_init_t_deep_from_file set it per
+    // column: the restart does not read the initial file again.
+    if (seb_t_deep_is_state() && m_t_deep[lev]) {
         VisMF::Write(*m_t_deep[lev],
                      MultiFabFileFullPrefix(lev, checkpointname, "Level_", "TwoStream_TDeep"));
+    }
+    if (m_rad->seb_deep_prognostic_enable && m_q_deep[lev]) {
         VisMF::Write(*m_q_deep[lev],
                      MultiFabFileFullPrefix(lev, checkpointname, "Level_", "TwoStream_QDeep"));
     }
@@ -761,21 +753,48 @@ TwoStreamRadiation::read_checkpoint (int lev, const std::string& restart_chkfile
                                                  m_q_sfc[lev]->nGrowVect(), true, period);
     }
     // A checkpoint written without the deep reservoir has no deep state: the defaults stand.
-    if (m_rad->seb_deep_prognostic_enable) {
+    // With erf.radiation.seb_init_t_deep_from_file and no deep reservoir only the deep
+    // temperature is read. A checkpoint without it was written by a run whose deep
+    // temperature was erf.radiation.seb_t_deep_default in every column, so that value, set
+    // by define_level, continues that run; the initial file is not read on a restart.
+    if (seb_t_deep_is_state()) {
+        const bool reservoir = m_rad->seb_deep_prognostic_enable;
+        const bool from_file = m_rad->seb_init_t_deep_from_file;
+        bool t_deep_read = false;
         MultiFab* deep[] = {m_t_deep[lev].get(), m_q_deep[lev].get()};
         const char* deep_names[] = {"TwoStream_TDeep", "TwoStream_QDeep"};
-        for (int n = 0; n < 2; ++n) {
+        for (int n = 0; n < (reservoir ? 2 : 1); ++n) {
             const std::string name =
                 MultiFabFileFullPrefix(lev, restart_chkfile, "Level_", deep_names[n]);
             if (deep[n] && amrex::FileExists(name + "_H")) {
                 erf_checkpoint::read_checkpoint_multifab(*deep[n], name, 0, 0, 1,
                                                          deep[n]->nGrowVect(), true, period);
+                if (n == 0) { t_deep_read = true; }
+            } else if (deep[n] && lev == 0 && n == 0 && from_file) {
+                // Written by a run without the input and without the reservoir
+                amrex::Print() << "NOTE: the checkpoint has no " << deep_names[n]
+                               << ": erf.radiation.seb_init_t_deep_from_file is not used on "
+                                  "this restart and the deep temperature "
+                               << (reservoir ? "starts from " : "is ")
+                               << "erf.radiation.seb_t_deep_default = "
+                               << m_rad->seb_t_deep_default << " K in every column\n";
+            } else if (deep[n] && lev == 0 && n == 1 && t_deep_read) {
+                // Written with seb_init_t_deep_from_file and without the reservoir
+                amrex::Print() << "NOTE: the checkpoint has no " << deep_names[n]
+                               << "; the deep temperature is the checkpoint's and "
+                                  "erf.radiation.seb_q_deep_default starts the deep moisture\n";
             } else if (deep[n] && lev == 0) {
                 amrex::Print() << "NOTE: the checkpoint has no " << deep_names[n]
                                << "; erf.radiation.seb_t_deep_default and seb_q_deep_default "
                                   "start the deep reservoir\n";
             }
         }
+    } else if (lev == 0 && amrex::FileExists(
+                   MultiFabFileFullPrefix(lev, restart_chkfile, "Level_", "TwoStream_TDeep") + "_H")) {
+        amrex::Print() << "NOTE: the checkpoint holds TwoStream_TDeep, which is not read: "
+                          "neither erf.radiation.seb_deep_prognostic_enable nor "
+                          "erf.radiation.seb_init_t_deep_from_file is set, and the deep "
+                          "temperature is erf.radiation.seb_t_deep_default in every column\n";
     }
     m_hydro.read_checkpoint(lev, restart_chkfile, period);
     m_snow.read_checkpoint(lev, restart_chkfile, period);
@@ -788,10 +807,10 @@ TwoStreamRadiation::seb_prognostic_fields (int lev)
     if (!seb_prognostic_active() || lev >= static_cast<int>(m_t_sfc.size())) { return out; }
     out.push_back(m_t_sfc[lev].get());
     out.push_back(m_q_sfc[lev].get());
-    if (m_rad->seb_deep_prognostic_enable) {
-        out.push_back(m_t_deep[lev].get());
-        out.push_back(m_q_deep[lev].get());
-    }
+    // The deep temperature is carried when it evolves and when it was set per column from
+    // the initial file (seb_t_deep_is_state); the deep moisture only when it evolves.
+    if (seb_t_deep_is_state()) { out.push_back(m_t_deep[lev].get()); }
+    if (m_rad->seb_deep_prognostic_enable) { out.push_back(m_q_deep[lev].get()); }
     if (m_hydro.totals(lev)) { out.push_back(m_hydro.totals(lev)); }
     if (m_snow.defined(lev)) {
         out.push_back(m_snow.swe(lev));
@@ -871,17 +890,10 @@ TwoStreamRadiation::advance (int lev,
     // A level on which no box holds a whole column has nothing for the sweep or the surface
     // state to work on; ERF::advance_radiation interpolates its fields from the parent
     // instead. Returning here covers the post-dycore call too, which comes from ERF::Advance
-    // and does not test for it. Per box, and identical to level_needs_interpolation() there:
+    // and does not test for it. Same test (rad_boxes_span_column) as level_needs_interpolation():
     // if the two tests disagreed, one of them would try to sweep a level the other had
     // already interpolated.
-    if (lev > 0) {
-        const BoxArray& lev_ba = cons_old.boxArray();
-        const Box& dom = geom.Domain();
-        for (int ibox = 0; ibox < lev_ba.size(); ++ibox) {
-            const Box& b = lev_ba[ibox];
-            if (b.smallEnd(2) != dom.smallEnd(2) || b.bigEnd(2) != dom.bigEnd(2)) { return; }
-        }
-    }
+    if (lev > 0 && !rad_boxes_span_column(cons_old.boxArray(), geom.Domain())) { return; }
 
     // ---- Contract checks. Each of these would otherwise surface as a wrong
     // heating rate or an out-of-bounds read several routines away.
@@ -1177,9 +1189,12 @@ TwoStreamRadiation::advance (int lev,
             // name (Noah-MP's smstav / smstot are soil-moisture availability
             // and total column water), so the reservoir values are the
             // scalar defaults. With erf.radiation.seb_deep_prognostic_enable they evolve
-            // (ERF_ForceRestoreHydrology.H) and are left alone here.
-            if (!rad_choice.seb_deep_prognostic_enable) {
+            // (ERF_ForceRestoreHydrology.H) and are left alone here. So is the deep
+            // temperature that erf.radiation.seb_init_t_deep_from_file set per column.
+            if (!seb_t_deep_is_state()) {
                 m_t_deep[lev]->setVal(rad_choice.seb_t_deep_default);
+            }
+            if (!rad_choice.seb_deep_prognostic_enable) {
                 m_q_deep[lev]->setVal(rad_choice.seb_q_deep_default);
             }
         }
@@ -1321,7 +1336,7 @@ TwoStreamRadiation::advance (int lev,
             const SEBLandMaskView skin_mask = seb_land_mask_view(has_seb_t_sfc ? balance_mask : nullptr, mfi);
 
             // Per-column latitude and longitude for the calendar sun (only
-            // the WRF and metgrid initialisations fill them; otherwise the
+            // the WRF and metgrid initializations fill them; otherwise the
             // erf.rad_cons_lat/lon constants apply).
             const bool has_latlon = (lat_m != nullptr) && (lon_m != nullptr);
             Array4<const amrex::Real> lat_arr, lon_arr;

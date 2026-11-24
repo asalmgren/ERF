@@ -45,7 +45,8 @@
         if (solverChoice.coupling_type == CouplingType::TwoWay && finest_level > 0) {
             if (level < finest_level) {
                 fr_as_crse = getAdvFluxReg(level+1);
-                // Once per step: the anelastic RK2 integrator registers fluxes at both stages
+                // Once per step: the RK2 integrator of anelastic and pseudo-incompressible levels
+                // registers fluxes at both stages
                 // (RefluxStageWeight)
                 if (nrk == 0) { fr_as_crse->reset(); }
             }
@@ -176,7 +177,7 @@
         // *****************************************************************************
 #ifdef ERF_USE_FIRE
         // on the level the fire grid refines; coarser levels get it by average-down.
-        // The heat and vapour with the WRF-Fire profile, then the smoke tracer,
+        // The heat and vapor with the WRF-Fire profile, then the smoke tracer,
         // proportional to the fuel burnt (FireCoupler::add_sources).
         if (m_fire_coupler && level == m_fire_coupler->level()) {
             bool has_moisture = (solverChoice.moisture_type != MoistureType::None);
@@ -232,7 +233,7 @@
 
         // Accumulate fixed-leaf-temperature canopy exchange in the staged
         // source storage.  The existing slow-pre and slow-post paths then
-        // apply rho-theta and rho-qv with their normal RK/anelastic weighting.
+        // apply rho-theta and rho-qv with their normal RK3 or RK2/MidPoint weighting.
         if (solverChoice.do_forest_drag && solverChoice.forest_biophysics &&
             solverChoice.forest_biophysics_heat && frontal_area) {
             AddCanopyBiophysicsHeatSources(cc_src,
@@ -362,18 +363,16 @@
                          Hfx3_EB, fine_geom, solverChoice, m_SurfaceLayer, domain_bcs_type_d, domain_bcs_type,
                          *zpn_to_use, *zpc_to_use, *ax_to_use, *ay_to_use, *az_to_use, *dJ_to_use,
                          stretched_dz_d[level], gradp[level],
-                         mapfac[level], get_eb(level),
-#ifdef ERF_USE_EAMXX_SHOC
-                         eamxx_shoc_interface[level].get(),
-#endif
+                         mapfac[level], get_eb(level), physbnd_mask,
                          native_shoc_driver[level].get(),
                          fr_as_crse, fr_as_fine, &base_to_use,
                          cloud_chamber_config.active ? &cloud_chamber_config : nullptr,
                          cloud_chamber_budget.get(),
                          ib_wall_face13[level].get(), ib_wall_face23[level].get(),
-                         ib_wall_face33[level].get(), ib_wall_hfx[level].get());
+                         ib_wall_face33[level].get(), ib_wall_hfx[level].get(),
+                         walldist[level].get());
 
-        // Anelastic coarse/fine faces in time (ERF_CoarseFineFaces.cpp): a coarse level adds
+        // Anelastic and pseudo-incompressible coarse/fine faces in time (ERF_CoarseFineFaces.cpp): a coarse level adds
         // this stage's mass fluxes to those of its step, a fine level registers the coarse
         // momenta its coarse/fine faces are filled from in this stage
         if (solverChoice.compressibility_type[level] != CompressibilityType::FullyCompressible) {
@@ -428,8 +427,9 @@
 #include "ERF_ImplicitPre.H"
 
             // NOTE: the implicit part of the vertical (rho theta) diffusion is not added to the flux
-            //       registers.  (rho theta) is refluxed only on anelastic levels, and there no stage
-            //       whose fluxes are registered solves implicitly: RK2 turns the solve off, and
+            //       registers.  (rho theta) is refluxed only on anelastic and pseudo-incompressible
+            //       levels, and there no stage whose fluxes are registered solves implicitly: RK2
+            //       turns the solve off, and
             //       MidPoint solves in stage 0 but registers stage 1 (see SolverChoice and
             //       StageFluxWeight).
 
@@ -448,11 +448,6 @@
             }
         }
 
-#ifdef ERF_USE_EAMXX_SHOC
-        if (solverChoice.turbChoice[level].uses_eamxx_shoc() && eamxx_shoc_interface[level]) {
-            eamxx_shoc_interface[level]->add_fast_tend(S_rhs);
-        }
-#endif
         if (solverChoice.turbChoice[level].uses_native_shoc() && native_shoc_driver[level]) {
             // Native SHOC applies its increment directly to state; ERF no
             // longer adds a separate fast RHS contribution.
@@ -589,7 +584,7 @@
             // Lateral and periodic ghost cells of the updated base state, on the new mesh (the functor
             // starts with the periodic and interior FillBoundary).  The vertical
             // ghost planes are again left alone: nothing that uses this base state on a moving mesh
-            // changes the solution through them.  The pressure gradient, buoyancy and cell-centred
+            // changes the solution through them.  The pressure gradient, buoyancy and cell-centered
             // sources read only cells inside the domain; the momentum sponge reads the plane below at
             // the bottom face, where w is set by the boundary condition instead.
             (*physbcs_base_new[level])(base_state_new[level],0,BaseState::num_comps,base_state_new[level].nGrowVect());
